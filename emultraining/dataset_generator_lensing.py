@@ -472,30 +472,34 @@ class dataset:
       ndim     = len(self.sampled_params)
       names    = list(self.sampled_params)
       bds      = self.bounds.copy()
-      nparams  = self.nparams # (if mcmc: nparams will be updated)
 
       if not self.unif == 1:
-        nwalkers = int(3*ndim)
+        nparams  = 20*self.nparams # help make sure we get unique samples
+        nwalkers = int(10*ndim)
         nsteps   = int(max(7500, nparams/nwalkers)) # (for safety we assume tau>100)
-        burnin   = int(0.3*nsteps)                       # 30% burn-in
-        thin     = max(1,int(0.8*float((nsteps-burnin)*nwalkers)/nparams))
+        burnin   = int(0.1*nsteps)                  # 10% burn-in
         
         sampler = emcee.EnsembleSampler(nwalkers = nwalkers, 
                                         ndim = ndim, 
-                                        moves=[(emcee.moves.DEMove(), 0.8),
-                                               (emcee.moves.DESnookerMove(), 0.2)],
+                                        moves=[(emcee.moves.DEMove(), 0.9),
+                                               (emcee.moves.DESnookerMove(), 0.1)],
                                         log_prob_fn = self.__param_logpost)
         sampler.run_mcmc(initial_state = self.fiducial[np.newaxis] + 
-                                         0.5*np.sqrt(np.diag(self.covmat))*
+                                         0.2*np.sqrt(np.diag(self.covmat))*
                                          np.random.normal(size=(nwalkers,ndim)), 
                          nsteps=nsteps, 
                          progress=False)
-        
-        xf  = sampler.get_chain(flat = True, discard = burnin, thin = thin)
-        lnp = sampler.get_log_prob(flat = True, discard = burnin, thin = thin)
-        xf  = xf[:nparams,:]
-        lnp = np.atleast_2d(lnp[:nparams]).T
+        xf  = sampler.get_chain(flat=True, discard=burnin, thin=1)
+        xf, keep = np.unique(xf, axis=0, return_index=True)
+        lnp = sampler.get_log_prob(flat=True, discard=burnin, thin=1)[keep, None]
+        if len(xf) < self.nparams:
+          print(f"Warning: only {len(xf)} unique rows, requested {self.nparams}")
+        else:
+          xf  = xf[:self.nparams,:]
+          lnp = lnp[:self.nparams,:]
+        nparams = len(xf)        
       else:
+        nparams  = self.nparams
         tbds = self.bounds.copy()
         # extra safety so logprior is not -infty --------------------
         tbds[:,0] = np.where(bds[:,0] > 0, 1.0001*bds[:,0], 0.9999*bds[:,0])
