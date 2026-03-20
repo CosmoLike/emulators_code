@@ -32,7 +32,7 @@ import contextlib, io
 #         --maxcorr 0.15 \
 #         --freqchk 2000 \
 #         --loadchk 0 \
-#         --append 1 \
+#         --append 0 \
 #         --boundary 1.0
 #
 #- The requested number of data vectors is given by the `--nparams` flag.
