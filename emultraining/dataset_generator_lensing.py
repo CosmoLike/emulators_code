@@ -32,7 +32,8 @@ import contextlib, io
 #         --maxcorr 0.15 \
 #         --freqchk 2000 \
 #         --loadchk 0 \
-#         --append 1 
+#         --append 1 \
+#         --boundary 1.0
 #
 #- The requested number of data vectors is given by the `--nparams` flag.
 #
@@ -43,6 +44,8 @@ import contextlib, io
 #       For example, our provided YAML selects the Fisher-based *w0wa_fisher_covmat.txt* covariance matrix
 #    -  Temperature reduces the curvature of the likelihood (`cov = cov/T`) and is set by `--temp` flag 
 #    -  The correlations of the original covariance matrix are reduced to be less than `--maxcorr`.
+#
+#  Even on Uniform Sampling, the temperature parameter is needed to set hard boundary on parameters with Gaussian prior
 #
 #- For visualization purposes, setting `--chain 1` sets the script to generate the training parameters without computing the data vectors.
 #
@@ -141,6 +144,10 @@ parser.add_argument("--append",
                     help="Append more models (only trye of loadchk == true)",
                     type=int,
                     choices=[0,1])
+parser.add_argument("--boundary",
+                    dest="boundary",
+                    help="Boundary setup: test/val requires boundaries to be cut",
+                    type=float)
 args, unknown = parser.parse_known_args()
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
@@ -204,6 +211,9 @@ class dataset:
     
     self.append = 0 if args.append is None else args.append
     self.bounds = None
+    self.bounds_adj = (
+      args.boundary if args.boundary is not None and 0 < args.boundary < 1 else 1
+    )    
     self.covmat = None 
     self.dtype = np.float32
     self.dvsf = None 
@@ -306,9 +316,28 @@ class dataset:
     # Reorder bounds -----------------------------------------------------------
     self.names = list(self.model.parameterization.sampled_params().keys())
     idx = self.reorder_idx_from_yaml_to_ord()
-    self.bounds = np.array(self.model.prior.bounds(confidence=0.999999),
+    
+    # Here T (temp) stretch the hard bounds on parameters with Gaussian prior --
+    tmp = np.array(self.model.prior.bounds(confidence=1.0),
+                                           copy=True, 
+                                           dtype=self.dtype)[idx,:]
+    self.bounds = np.array(self.model.prior.bounds(confidence=0.9999994),
                            copy=True, 
                            dtype=self.dtype)[idx,:]
+    for i in range(len(tmp)):
+      if math.isinf(tmp[i,0]) or math.isinf(tmp[i,1]): 
+        width = (self.bounds[i, 1] - self.bounds[i, 0])
+        if math.isinf(tmp[i,0]):
+          self.bounds[i,0] -= self.temp*width/5.0
+        if math.isinf(tmp[i,1]):
+          self.bounds[i,1] += self.temp*width/5.0
+
+    # near the bds: emulator accuracy degrades: (val/test) must reduce bds -----
+    if self.bounds_adj < 1:
+      margin = (1-self.bounds_adj) * 0.5*(self.bounds[:, 1]-self.bounds[:, 0])
+      self.bounds[:, 0] += margin
+      self.bounds[:, 1] -= margin
+
     # adjust covmat- -----------------------------------------------------------
     if not self.unif == 1:
       #-------------------------------------------------------------------------
@@ -448,11 +477,21 @@ class dataset:
   #-----------------------------------------------------------------------------
   # likelihood
   #-----------------------------------------------------------------------------
+  def __param_logprior(self, x):
+    # because we shrink the prior, we need to do this check
+    if np.all((x >= self.bounds[:, 0]) & (x <= self.bounds[:, 1])):
+      return 0.0 
+    else:
+      return -np.inf
+
   def __param_logpost(self,x):
     y = x - self.fiducial
     logprior = self.model.prior.logp(x[self.reorder_idx_from_ord_to_yaml()])
     if math.isinf(logprior):
       return -np.inf 
+    elif math.isinf(self.__param_logprior(x)):
+      # this is important when --boundary command line option is < 1
+      return -np.inf
     else:
       logp = (-0.5*(y @ self.inv_covmat @ y) + logprior)/self.temp
       return logp
@@ -471,10 +510,10 @@ class dataset:
     if (loadedfromchk == False) or (loadedfromchk == True and self.append == 1):
       ndim     = len(self.sampled_params)
       names    = list(self.sampled_params)
-      bds      = self.bounds.copy()
-
+      
       if not self.unif == 1:
-        nparams  = 20*self.nparams # help make sure we get unique samples
+        # high number of samples: make sure we get unique samples
+        nparams  = 40*self.nparams if self.bounds_adj < 1 else 20*self.nparams
         nwalkers = int(10*ndim)
         nsteps   = int(max(7500, nparams/nwalkers)) # (for safety we assume tau>100)
         burnin   = int(0.1*nsteps)                  # 10% burn-in
@@ -485,7 +524,7 @@ class dataset:
                                                (emcee.moves.DESnookerMove(), 0.1)],
                                         log_prob_fn = self.__param_logpost)
         sampler.run_mcmc(initial_state = self.fiducial[np.newaxis] + 
-                                         0.2*np.sqrt(np.diag(self.covmat))*
+                                         0.5*np.sqrt(np.diag(self.covmat))*
                                          np.random.normal(size=(nwalkers,ndim)), 
                          nsteps=nsteps, 
                          progress=False)
@@ -500,12 +539,12 @@ class dataset:
         nparams = len(xf)        
       else:
         nparams  = self.nparams
-        tbds = self.bounds.copy()
+        bds = self.bounds.copy()
         # extra safety so logprior is not -infty --------------------
-        tbds[:,0] = np.where(bds[:,0] > 0, 1.0001*bds[:,0], 0.9999*bds[:,0])
-        tbds[:,1] = np.where(bds[:,1] > 0, 0.9999*bds[:,1], 1.0001*bds[:,1])
-        xf  = np.random.uniform(low  = tbds[:,0], 
-                                high = tbds[:,1], 
+        bds[:,0] = np.where(bds[:,0] > 0, 1.0001*self.bounds[:,0],0.9999*self.bounds[:,0])
+        bds[:,1] = np.where(bds[:,1] > 0, 0.9999*self.bounds[:,1],1.0001*self.bounds[:,1])
+        xf  = np.random.uniform(low  = bds[:,0], 
+                                high = bds[:,1], 
                                 size = (nparams,ndim))
         lnp = np.ones((nparams,1), dtype=self.dtype)
         # Double check that prior is not -infty --------------------------------
@@ -538,7 +577,8 @@ class dataset:
             tau = 1 # make sure main MPI worker does not crash over trivial check
         
         # save a range files ---------------------------------------------------
-        hd = ["weights","lnp"] + names
+        bds = self.bounds.copy()
+        hd  = ["weights","lnp"] + names
         rows = [(str(n),float(l),float(h)) for n,l,h in zip(names,bds[:,0],bds[:,1])]
         with open(f"{self.paramsf}.ranges", "w") as f: 
           f.write(f"# {' '.join(hd)}\n")
