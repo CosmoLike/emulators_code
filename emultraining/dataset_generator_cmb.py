@@ -422,12 +422,15 @@ class dataset:
                                                  f"{self.paramsf}.ranges",
                                                  f"{self.paramsf}.1.txt"]])
       if loadchk:
+        # load sample file begins ----------------------------------------------  
         # row 0/1 rows are weights, lnp. Last row is chi2
         self.samples = np.atleast_2d(np.loadtxt(f"{self.paramsf}.1.txt", 
                                                 dtype=self.dtype))[:,2:-1]
         if self.samples.ndim != 2:
           raise ValueError(f"samples must be 2D, got {self.samples.shape}") 
-        
+        # load sample file ends ------------------------------------------------ 
+
+        # load fail file begins ------------------------------------------------
         self.failed = np.atleast_1d(np.loadtxt(f"{self.failf}.txt", 
                                                dtype=np.uint8))
         self.failed = np.asarray(self.failed).astype(bool)
@@ -436,23 +439,26 @@ class dataset:
         
         if self.samples.shape[0] != self.failed.shape[0]:
           raise ValueError(f"Incompatible samples/failed chk files")
+        # load fail file ends --------------------------------------------------
 
         # load datavectors begins ----------------------------------------------
         arr = np.load(f"{self.dvsf}.npy", 
-                      mmap_mode="r", 
-                      allow_pickle=False)
-        RAMneed = arr.nbytes + self.samples.nbytes + self.failed.nbytes
+                      mmap_mode = "r", 
+                      allow_pickle = False)
+        RAMneed = (arr.nbytes + 
+                   self.samples.nbytes + 
+                   self.failed.nbytes)
         RAMavail = psutil.virtual_memory().available
         if RAMneed < 0.75 * RAMavail:
-          self.datavectors = np.load(f"{self.dvsf}.npy", allow_pickle=False)
+          self.datavectors = np.load(f"{self.dvsf}.npy", allow_pickle = False)
           self.dvs_is_memmap = False
         else:
           print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
                 f"There is {RAMavail/1e9:.2f} GB of RAM available. "
                 f"We will read dvs from HD (slow)")
           self.datavectors = np.load(f"{self.dvsf}.npy", 
-                                     mmap_mode="r+", 
-                                     allow_pickle=False)
+                                     mmap_mode = "r+", 
+                                     allow_pickle = False)
           self.dvs_is_memmap = True
         del arr
         # load datavectors ends ------------------------------------------------
@@ -470,12 +476,18 @@ class dataset:
     return rtnvar
   
   def __save_chk(self):
+    # save data vector file ----------------------------------------------------
     if self.dvs_is_memmap == True:
       self.datavectors.flush()  # checkpoint dv in-place
     else:
+      # save (flush) dvs to tmp file (safer) -----------------------------------
       np.save(f"{self.dvsf}.tmp.npy", self.datavectors)
+      # save data vector file (from tmp) ---------------------------------------
       os.replace(f"{self.dvsf}.tmp.npy", f"{self.dvsf}.npy")
+    # save fail file -----------------------------------------------------------
+    # save (flush) dvs to tmp file (safer) -------------------------------------
     np.savetxt(f"{self.failf}.tmp.txt", self.failed.astype(np.uint8), fmt="%d")
+    # save data vector file (from tmp) -----------------------------------------
     os.replace(f"{self.failf}.tmp.txt", f"{self.failf}.txt")
 
   #-----------------------------------------------------------------------------
@@ -631,6 +643,11 @@ class dataset:
         del chi2      # save RAM memory
         gc.collect()  # save RAM memory
       else:
+        # ----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
+        # This option = loadedfromchk == True and self.append == 1
+        # ----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
         # append chain file begins ---------------------------------------------
         fname = f"{self.paramsf}.1.txt";
         with open(fname, "a") as f: # append mode
@@ -645,10 +662,10 @@ class dataset:
         del chi2      # save RAM memory
         gc.collect()  # save RAM memory
         
-
         self.samples = np.atleast_2d(np.loadtxt(fname, dtype=self.dtype))[:,2:-1]
         if self.samples.ndim != 2:
           raise ValueError(f"samples must be 2D, got {self.samples.shape}") 
+        # append chain file ends -----------------------------------------------
 
         # append fail file begins ----------------------------------------------
         fname = f"{self.failf}.txt";
@@ -663,44 +680,52 @@ class dataset:
 
         if self.samples.shape[0] != self.failed.shape[0]:
           raise ValueError(f"Incompatible samples/failed chk files")
+        # append fail file begins ----------------------------------------------
 
-        # Expand dvs begins ----------------------------------------------------
+        # append dvs (with zeros) begins ---------------------------------------
         nrows   = self.datavectors.shape[0]
         ncols   = self.datavectors.shape[1]
         nstride = self.datavectors.shape[2]
 
-        RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
+        RAMneed = ( self.samples.nbytes + 
+                    self.failed.nbytes + 
                     self.datavectors.nbytes + 
                     (nrows + nparams)*ncols*nstride*self.datavectors.dtype.itemsize)
         RAMavail = psutil.virtual_memory().available
+        
         if RAMneed < 0.75 * RAMavail:
+          # setup new datavector numpy array -----------------------------------
           self.datavectors = np.vstack((self.datavectors, 
-                                        np.zeros((nparams,ncols,nstride),
-                                                 dtype=self.dtype)
-                                        ))
+                                        np.zeros((nparams, ncols, nstride), dtype=self.dtype)))
+          # save (flush) dvs to tmp file (safer) -------------------------------
           np.save(f"{self.dvsf}.tmp.npy", self.datavectors)
+          # save data vector file (from tmp) -----------------------------------
           os.replace(f"{self.dvsf}.tmp.npy", f"{self.dvsf}.npy")
           self.dvs_is_memmap = False
         else:
           print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
                 f"There is {RAMavail/1e9:.2f} GB of RAM available. "
                 f"We will read dvs from HD (slow)")
+          # setup new datavector numpy array -----------------------------------
           datavectors = open_memmap(f"{self.dvsf}.tmp.npy", 
-                                    mode="w+",
-                                    shape=(nrows + nparams, ncols, nstride),
-                                    dtype=self.datavectors.dtype)
-          for s in range(0, nrows, 2500): # chunks = avoid RAM spikes) 
+                                    mode = "w+",
+                                    shape = (nrows + nparams, ncols, nstride),
+                                    dtype = self.datavectors.dtype)
+          for s in range(0, nrows, 2500): # read dvs in chunks: avoid RAM spikes 
             e = min(nrows, s + 2500)
             datavectors[s:e] = self.datavectors[s:e]
           for s in range(nrows, nrows + nparams, 2500):
             e = min(nrows + nparams, s + 2500)
             datavectors[s:e] = 0
-          datavectors.flush()
+          # save (flush) data vector (in-place) --------------------------------
+          datavectors.flush() 
           del datavectors
+          # save data vector file (from tmp) -----------------------------------
           os.replace(f"{self.dvsf}.tmp.npy", f"{self.dvsf}.npy")
+          # finally, load the new dv numpy array from file ---------------------
           self.datavectors = np.load(f"{self.dvsf}.npy", 
-                                     mmap_mode="r+", 
-                                     allow_pickle=False)
+                                     mmap_mode = "r+", 
+                                     allow_pickle = False)
           self.dvs_is_memmap = True
         # Expand dvs ends ------------------------------------------------------
         
@@ -718,11 +743,8 @@ class dataset:
                      fmt="%.9e",
                      header=' '.join(names),
                      comments="# ")
-
-        # set  self.loadedfromchk ----------------------------------------------
+        # set self.loadedfromchk -----------------------------------------------
         self.loadedfromchk = True
-
-
     # set self.loadedsamples ---------------------------------------------------
     self.loadedsamples = True
   
@@ -750,20 +772,24 @@ class dataset:
     ncols = 5
     out = np.zeros((nrows, ncols), dtype=self.dtype)
 
-    captured = 0
+    captured = 0 # variable that will hold terminal output 
     with capture_native_output() as tmp:
       for (x, _), z in zip(self.model._component_order.items(),
                            self.model._params_of_dependencies):
         x.check_cache_and_compute(
-            params_values_dict=dict({p: param[p] for p in x.input_params}),
-            want_derived=self.derived,
-            dependency_params=list(param.keys()),
-            cached=True
+            params_values_dict = dict({p: param[p] for p in x.input_params}),
+            want_derived = self.derived,
+            dependency_params = list(param.keys()),
+            cached = True
         )
       tmp.seek(0)
-      captured = tmp.read()
+      captured = tmp.read() # copy terminal output -----------------------------
+    
+    # check for CAMB errors in the terminal output -----------------------------
     if any(kw in captured for kw in camb_error_keywords):
       raise RuntimeError(f"CAMB Fortran error: {captured.strip()}")
+    
+    # get results from Theory block (already computed) -------------------------
     for (x, _), z in zip(self.model._component_order.items(),
                          self.model._params_of_dependencies):
       if (self.probe == "cmblensed" and
