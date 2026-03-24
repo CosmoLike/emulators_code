@@ -1,7 +1,6 @@
 import numpy as np
 import emcee, argparse, os, sys, yaml, time, traceback 
 import psutil, gc, math, copy, tempfile
-from cobaya.yaml import yaml_load
 from cobaya.model import get_model
 from mpi4py import MPI
 from pathlib import Path
@@ -266,7 +265,7 @@ class dataset:
       raise KeyError(f"Cobaya YAML missing required blocks {missing}: {self.yaml}") 
 
     train_args = info["train_args"]
-    required_keys = ['probe', 'ord', 'lrange', 'derived']
+    required_keys = ['probe', 'ord', 'lrange']
     if not self.unif == 1:
       required_keys += ['fiducial', 'params_covmat_file']
 
@@ -468,11 +467,10 @@ class dataset:
           raise ValueError(f"datavectors must be 3D, got {self.datavectors.shape}") 
         if self.datavectors.shape[0] != self.samples.shape[0]:
           raise ValueError(f"Incompatible samples/datavector chk files")
-        if loadchk: 
-          print("Loaded models from chk")
-          if self.append == 0:
-            self.loadedsamples = True
-            self.loadedfromchk = True
+        print("Loaded models from chk")
+        if self.append == 0:
+          self.loadedsamples = True
+          self.loadedfromchk = True
         rtnvar = True
     return rtnvar
   

@@ -1,7 +1,6 @@
 import numpy as np
 import emcee, argparse, os, sys, yaml, time, traceback 
 import psutil, gc, math, copy, tempfile
-from cobaya.yaml import yaml_load
 from cobaya.model import get_model
 from mpi4py import MPI
 from pathlib import Path
@@ -746,6 +745,26 @@ class dataset:
   #-----------------------------------------------------------------------------
   # datavectors
   #-----------------------------------------------------------------------------
+  def __allocate_data_vector(self, nrows, ncols):
+    RAMneed = ( self.samples.nbytes + 
+                self.failed.nbytes + 
+                nrows*ncols*dvs.dtype.itemsize)
+    RAMavail = psutil.virtual_memory().available
+    if RAMneed < 0.75 * RAMavail:
+      self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
+      self.dvs_is_memmap = False
+    else:
+      print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
+            f"There is {RAMavail/1e9:.2f} GB of RAM available. "
+            f"We will read dvs from HD (slow)")
+      self.datavectors = open_memmap(f"{self.dvsf}.npy", 
+                                     mode="w+",
+                                     shape=(nrows, ncols),
+                                     dtype=self.dtype)
+      self.datavectors[:] = 0.0
+      self.datavectors.flush()
+          self.dvs_is_memmap = True
+
   def _compute_dvs_from_sample(self, sample):
     # Define fortran errors we want to capture ---------------------------------
     camb_error_keywords = {"ERROR", "error", "Did not converge"}
@@ -819,25 +838,7 @@ class dataset:
                              f"Cannot determine datavector length.")
         nrows = nparams
         ncols = len(dvs)
-  
-        RAMneed = ( self.samples.nbytes + 
-                    self.failed.nbytes + 
-                    nrows*ncols*dvs.dtype.itemsize)
-        RAMavail = psutil.virtual_memory().available
-        if RAMneed < 0.75 * RAMavail:
-          self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
-          self.dvs_is_memmap = False
-        else:
-          print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                f"We will read dvs from HD (slow)")
-          self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols),
-                                         dtype=self.dtype)
-          self.datavectors[:] = 0.0
-          self.datavectors.flush()
-          self.dvs_is_memmap = True
+        self.__allocate_data_vector(nrows=nrows, ncols=ncols)
         # Allocate data vectors end --------------------------------------------
         
         self.datavectors[0] = dvs   # first data vector was already computed
@@ -895,25 +896,7 @@ class dataset:
             comm.Abort(1)
           nrows = nparams
           ncols = len(dvs)
-
-          RAMneed = ( self.samples.nbytes + 
-                      self.failed.nbytes + 
-                      nrows*ncols*dvs.dtype.itemsize )
-          RAMavail = psutil.virtual_memory().available
-          if RAMneed < 0.75 * RAMavail:
-            self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
-            self.dvs_is_memmap = False
-          else:
-            print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                  f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                  f"We will read dvs from HD (slow)")
-            self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols),
-                                         dtype=self.dtype)
-            self.datavectors[:] = 0.0
-            self.datavectors.flush()
-            self.dvs_is_memmap = True
+          self.__allocate_data_vector(nrows=nrows, ncols=ncols)
           # Allocate data vectors end ------------------------------------------
           
           self.datavectors[0] = dvs     # first data vector was already computed

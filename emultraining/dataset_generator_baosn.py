@@ -1,7 +1,6 @@
 import numpy as np
 import emcee, argparse, os, sys, yaml, time, traceback
 import psutil, gc, math, copy, tempfile
-from cobaya.yaml import yaml_load
 from cobaya.model import get_model
 from mpi4py import MPI
 from pathlib import Path
@@ -351,10 +350,10 @@ class dataset:
 
     self.probe = "baosn"
 
-    self.sampled_params = train_args['ord'][0]  # preferred ordering of params
+    self.sampled_params = train_args['ord']  # preferred ordering of params
 
     self.derived = train_args['derived'] if 'derived' in train_args else []
-    
+
     if not self.unif == 1:
       fid = train_args["fiducial"] # load fiducial data vector
       
