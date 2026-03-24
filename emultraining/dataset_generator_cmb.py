@@ -288,9 +288,10 @@ class dataset:
 
     self.sampled_params = train_args['ord'] # preferred ordering of params
 
-    self.derived = train_args['derived']
+    self.derived = train_args['derived'] if 'derived' in train_args else []
 
     self.lrange = np.array(train_args['lrange'], dtype=int)
+    
     if not self.unif == 1:
       fid = train_args["fiducial"] # load fiducial data vector
       
@@ -751,6 +752,26 @@ class dataset:
   #-----------------------------------------------------------------------------
   # datavectors
   #-----------------------------------------------------------------------------
+  def __allocate_data_vector(self, nrows, ncols, nstride):  
+    RAMneed = ( self.samples.nbytes + 
+                self.failed.nbytes + 
+                nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
+    RAMavail = psutil.virtual_memory().available
+    if RAMneed < 0.75 * RAMavail:
+      self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
+      self.dvs_is_memmap = False
+    else:
+      print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
+            f"There is {RAMavail/1e9:.2f} GB of RAM available. "
+            f"We will read dvs from HD (slow)")
+      self.datavectors = open_memmap(f"{self.dvsf}.npy", 
+                                     mode = "w+",
+                                     shape = (nrows, ncols, nstride),
+                                     dtype = self.dtype)
+      self.datavectors[::] = 0.0
+      self.datavectors.flush()
+      self.dvs_is_memmap = True
+
   def _compute_dvs_from_sample(self, sample):
     # Define fortran errors we want to capture ---------------------------------
     camb_error_keywords = {"ERROR", "error", "Did not converge"}
@@ -843,34 +864,20 @@ class dataset:
       nparams = len(self.samples)
 
       if not self.loadedfromchk:
+        # Allocate failed array begins -----------------------------------------
         self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
         self.failed = np.asarray(self.failed).astype(bool)
-        # Allocate dvs begins --------------------------------------------------
+        
+        # Allocate data vectors begins -----------------------------------------
         nrows   = nparams
         ncols   = (self.lrange[1] - self.lrange[0]) + 1
         nstride = 5 # TT, TE, EE, PHIPHI, EXTRA (waste a lot of RAM but simple)
+        self.__allocate_data_vector(nrows=nrows, ncols=ncols, nstride=nstride)
+        # Allocate data vectors end --------------------------------------------
         
-        RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
-                    nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
-        RAMavail = psutil.virtual_memory().available
-        if RAMneed < 0.75 * RAMavail:
-          self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
-          self.dvs_is_memmap = False
-        else:
-          print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                f"We will read dvs from HD (slow)")
-          self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols, nstride),
-                                         dtype=self.dtype)
-          self.datavectors[::] = 0.0
-          self.datavectors.flush()
-          self.dvs_is_memmap = True
-        # Allocate dvs end -----------------------------------------------------
-        idx = np.arange(0, nparams)
+        idx = np.arange(0, nparams) # indexes to compute data vectors
       else:
-        idx = np.where(self.failed == True)[0] 
+        idx = np.where(self.failed == True)[0] # indexes to compute data vectors
 
       for i in idx:
         try:
@@ -904,35 +911,21 @@ class dataset:
         completed = np.zeros(nparams, dtype=bool)
 
         if not self.loadedfromchk:
+          # Allocate failed array begins ---------------------------------------
           self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
           self.failed = np.asarray(self.failed).astype(bool)
-          # Allocate dvs begins ------------------------------------------------
+          
+          # Allocate data vectors begins ---------------------------------------
           nrows = nparams
           ncols = (self.lrange[1] - self.lrange[0]) + 1
           nstride = 5 # TT, TE, EE, PHIPHI, EXTRA (waste a lot of RAM but simple)
-
-          RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
-                      nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
-          RAMavail = psutil.virtual_memory().available
-          if RAMneed < 0.75 * RAMavail:
-            self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
-            self.dvs_is_memmap = False
-          else:
-            print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                  f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                  f"We will read dvs from HD (slow)")
-            self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols, nstride),
-                                         dtype=self.dtype)
-            self.datavectors[::] = 0.0
-            self.datavectors.flush()
-            self.dvs_is_memmap = True
-          # Allocate dvs end ---------------------------------------------------
-          idx0 = np.arange(0, nparams)
+          self.__allocate_data_vector(nrows=nrows, ncols=ncols, nstride=nstride)
+          # Allocate data vectors end ------------------------------------------
+          
+          idx0 = np.arange(0, nparams) # indexes to compute data vectors
         else:
           completed = ~self.failed
-          idx0 = np.where(self.failed == True)[0]
+          idx0 = np.where(self.failed == True)[0] # indexes to compute data vectors
         
         tasks   = deque(idx0.tolist())
         nactive = min(nworkers, len(tasks))

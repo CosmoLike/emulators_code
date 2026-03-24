@@ -217,10 +217,13 @@ class baosn_aux_likelihood(Likelihood):
     if args.nzhd  is not None: self.nzhd  = int(abs(args.nzhd))
     if args.zmax  is not None: self.zmax  = abs(args.zmax)
     if args.nzmax is not None: self.nzmax = int(abs(args.nzmax))
-    
+    self.nztotal = self.nzhd + self.nzmax
+
     self.z1 = np.linspace(0.0, self.zhd, self.nzhd, endpoint = False)
     self.z2 = np.linspace(self.zhd, self.zmax, self.nzmax, endpoint = True)
-    self.data = np.concatenate((z1, z2), axis = 0)
+    if (len(self.z1) + len(self.z2)) != self.nztotal:
+      raise ValueError("len(z1) + len(z2) != self.nztotal (internal logic error)")
+    self.data = np.concatenate((self.z1, self.z2), axis = 0)
   
   def get_requirements(self):
     return {
@@ -301,11 +304,6 @@ class dataset:
     self.yaml = f"{fileroot}/test.yaml" if args.yaml is None else f"{fileroot}/{args.yaml}"
     if not os.path.isfile(f"{self.yaml}"):
       raise FileNotFoundError(f"YAML file not found: {self.yaml}")
-    self.zhd = 3.0 if args.zhd is None else abs(args.zhd)
-    self.nzhd = 600 if args.zhd is None else int(abs(args.nzhd))
-    self.zmax = 1200.0  if args.zhd is None else abs(args.zmax)
-    self.nzmax = 200 if args.zhd is None else int(abs(args.nzmax))
-    self.nztotal = self.nzhd + self.nzmax
     #---------------------------------------------------------------------------
     # Load yaml
     #---------------------------------------------------------------------------
@@ -342,12 +340,21 @@ class dataset:
     except Exception as e:
       raise RuntimeError(f"get_model failed for {self.yaml}: {e}") from e
 
-    self.probe = train_args["probe"]
-    if self.probe not in ("cs", "ggl", "gc"):
-      raise ValueError(f"Invalid Probe: {self.probe}")
+    self.zarray = self.model.likelihood['dummy'].data.copy()
+    self.zhd    = self.model.likelihood['dummy'].zhd
+    self.nzhd   = self.model.likelihood['dummy'].nzhd
+    self.zmax   = self.model.likelihood['dummy'].zmax
+    self.nzmax  = self.model.likelihood['dummy'].nzmax
+    self.nztotal = self.nzhd + self.nzmax
+    if len(self.zarray) != self.nztotal:
+      raise ValueError("len(self.zarray) != self.nztotal (internal logic error)")
+
+    self.probe = "baosn"
 
     self.sampled_params = train_args['ord'][0]  # preferred ordering of params
 
+    self.derived = train_args['derived'] if 'derived' in train_args else []
+    
     if not self.unif == 1:
       fid = train_args["fiducial"] # load fiducial data vector
       
@@ -523,12 +530,11 @@ class dataset:
         if self.datavectors.ndim != 3:
           raise ValueError(f"datavectors must be 3D, got {self.datavectors.shape}") 
         if self.datavectors.shape[0] != self.samples.shape[0]:
-          raise ValueError(f"Incompatible samples/datavector chk files")
-        if loadchk: 
-          print("Loaded models from chk")
-          if self.append == 0:
-            self.loadedsamples = True
-            self.loadedfromchk = True
+          raise ValueError(f"Incompatible samples/datavector chk files")  
+        print("Loaded models from chk")
+        if self.append == 0:
+          self.loadedsamples = True
+          self.loadedfromchk = True
         rtnvar = True
     return rtnvar
   
@@ -753,7 +759,7 @@ class dataset:
         if RAMneed < 0.75 * RAMavail:
           # setup new datavector numpy array -----------------------------------
           self.datavectors = np.vstack((self.datavectors, 
-                                        np.zeros((nparams,ncols), dtype=self.dtype)))
+                                        np.zeros((nparams, ncols, nstride), dtype=self.dtype)))
           # save (flush) dvs to tmp file (safer) -------------------------------
           np.save(f"{self.dvsf}.tmp.npy", self.datavectors)
           # save data vector file (from tmp) -----------------------------------
@@ -766,7 +772,7 @@ class dataset:
           # setup new datavector numpy array -----------------------------------
           datavectors = open_memmap(f"{self.dvsf}.tmp.npy", 
                                     mode = "w+",
-                                    shape = (nrows + nparams, ncols),
+                                    shape = (nrows + nparams, ncols, nstride),
                                     dtype = self.datavectors.dtype)
           for s in range(0, nrows, 2500): # read dvs in chunks: avoid RAM spikes
             e = min(nrows, s + 2500)
@@ -804,10 +810,30 @@ class dataset:
         self.loadedfromchk = True
     # set self.loadedsamples ---------------------------------------------------
     self.loadedsamples = True
-  
+
   #-----------------------------------------------------------------------------
   # datavectors
   #-----------------------------------------------------------------------------
+  def __allocate_data_vector(self, nrows, ncols, nstride):
+    RAMneed = ( self.samples.nbytes + 
+                self.failed.nbytes + 
+                nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
+    RAMavail = psutil.virtual_memory().available
+    if RAMneed < 0.75 * RAMavail:
+      self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
+      self.dvs_is_memmap = False
+    else:
+      print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
+            f"There is {RAMavail/1e9:.2f} GB of RAM available. "
+            f"We will read dvs from HD (slow)")
+      self.datavectors = open_memmap(f"{self.dvsf}.npy", 
+                                     mode = "w+",
+                                     shape = (nrows, ncols, nstride),
+                                     dtype = self.dtype)
+      self.datavectors[::] = 0.0
+      self.datavectors.flush()
+      self.dvs_is_memmap = True
+
   def _compute_dvs_from_sample(self, sample):
     # Define fortran errors we want to capture ---------------------------------
     camb_error_keywords = {"ERROR", "error", "Did not converge"}
@@ -825,8 +851,8 @@ class dataset:
                          f"Values: {dict(zip(self.sampled_params, sample))}")
 
     # Compute data vector (within using cobaya API) ----------------------------
-    nrows = (self.lrange[1] - self.lrange[0]) + 1
-    ncols = 2
+    nrows = self.nztotal
+    ncols = 3
     out = np.zeros((nrows, ncols), dtype=self.dtype)
 
     captured = 0 # variable that will hold terminal output 
@@ -852,10 +878,17 @@ class dataset:
       if (hasattr(x,'get_angular_diameter_distance') and
           callable(getattr(x, 'get_angular_diameter_distance')) and
           hasattr(x,'get_Hubble') and
-          callable(getattr(x, 'Hubble'))
-          ):    
-        out[:,0] = x.get_angular_diameter_distance()
-        out[:,1] = x.get_Hubble()
+          callable(getattr(x, 'get_Hubble'))
+          ):   
+
+        tmp1 = x.get_angular_diameter_distance(self.zarray)*(1+self.zarray)**2
+        tmp2 = x.get_Hubble(self.zarray) 
+        if (len(tmp1) != self.nztotal):
+          raise ValueError("len(angular_diameter_distance) != self.nztotal")
+        if (len(tmp2) != self.nztotal):
+          raise ValueError("len(Hubble) != self.nztotal")
+        out[:,0] = tmp1.copy()
+        out[:,1] = tmp2.copy()
         if hasattr(x, 'get_param') and callable(getattr(x, 'get_param')):
           for i, p in enumerate(self.derived):
             try:
@@ -885,36 +918,22 @@ class dataset:
       nparams = len(self.samples)
 
       if not self.loadedfromchk:
-        self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
+        # Allocate failed array begins -----------------------------------------
+        self.failed = np.ones(nparams, dtype = np.uint8) # start w/ all failed
         self.failed = np.asarray(self.failed).astype(bool)
-        # Allocate dvs begins --------------------------------------------------
+        
+        # Allocate data vectors begins -----------------------------------------
         nrows   = nparams
-        ncols   = (self.lrange[1] - self.lrange[0]) + 1
+        ncols   = self.nztotal
         nstride = 3 # 0: angular_diameter_distance data vector,
                     # 1: Hubble data vector,
                     # 2: derived parameters
+        self.__allocate_data_vector(nrows=nrows, ncols=ncols, nstride=nstride)
+        # Allocate data vectors end --------------------------------------------
         
-        RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
-                    nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
-        RAMavail = psutil.virtual_memory().available
-        if RAMneed < 0.75 * RAMavail:
-          self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
-          self.dvs_is_memmap = False
-        else:
-          print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                f"We will read dvs from HD (slow)")
-          self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols, nstride),
-                                         dtype=self.dtype)
-          self.datavectors[::] = 0.0
-          self.datavectors.flush()
-          self.dvs_is_memmap = True
-        # Allocate dvs end -----------------------------------------------------
-        idx = np.arange(0, nparams)
+        idx = np.arange(0, nparams) # indexes to compute data vectors
       else:
-        idx = np.where(self.failed == True)[0] 
+        idx = np.where(self.failed == True)[0] # indexes to compute data vectors
 
       for i in idx:
         try:
@@ -950,33 +969,20 @@ class dataset:
         if not self.loadedfromchk:
           self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
           self.failed = np.asarray(self.failed).astype(bool)
-          # Allocate dvs begins ------------------------------------------------
+          
+          # Allocate data vectors begins ---------------------------------------
           nrows = nparams
-          ncols = (self.lrange[1] - self.lrange[0]) + 1
-          nstride = 5 # TT, TE, EE, PHIPHI, EXTRA (waste a lot of RAM but simple)
+          ncols = self.nztotal
+          nstride = 3 # 0: angular_diameter_distance data vector,
+                      # 1: Hubble data vector,
+                      # 2: derived parameters
+          self.__allocate_data_vector(nrows=nrows, ncols=ncols, nstride=nstride)
+          # Allocate data vectors end ------------------------------------------
 
-          RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
-                      nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
-          RAMavail = psutil.virtual_memory().available
-          if RAMneed < 0.75 * RAMavail:
-            self.datavectors = np.zeros((nrows, ncols, nstride), dtype=self.dtype)
-            self.dvs_is_memmap = False
-          else:
-            print(f"Warning: samples & dvs need {RAMneed/1e9:.2f} GB of RAM. "
-                  f"There is {RAMavail/1e9:.2f} GB of RAM available. "
-                  f"We will read dvs from HD (slow)")
-            self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                         mode="w+",
-                                         shape=(nrows, ncols, nstride),
-                                         dtype=self.dtype)
-            self.datavectors[::] = 0.0
-            self.datavectors.flush()
-            self.dvs_is_memmap = True
-          # Allocate dvs end ---------------------------------------------------
-          idx0 = np.arange(0, nparams)
+          idx0 = np.arange(0, nparams) # indexes to compute data vectors
         else:
           completed = ~self.failed
-          idx0 = np.where(self.failed == True)[0]
+          idx0 = np.where(self.failed == True)[0] # indexes to compute data vectors
         
         tasks   = deque(idx0.tolist())
         nactive = min(nworkers, len(tasks))
@@ -1161,107 +1167,3 @@ if __name__ == "__main__":
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
-
-
-
-
-
-#===================================================================================================
-# datavectors
-
-def generate_parameters(N, u_bound, l_bound, mode, parameters_file, save=True):
-    D = len(u_bound)
-
-    if mode=='train':
-        
-        N_LHS = int(0.05*N)
-        sampler = qmc.LatinHypercube(d=D)
-        sample = sampler.random(n=N_LHS)
-        sample_scaled = qmc.scale(sample, l_bound, u_bound)
-
-        N_uni = N-N_LHS
-        data = np.random.uniform(low=l_bound, high=u_bound, size=(N_uni, D))
-        samples = np.concatenate((sample_scaled, data), axis=0)
-    else:
-        samples = np.random.uniform(low=l_bound, high=u_bound, size=(N, D))
-
-    if save:
-        np.save(parameters_file, samples)
-        print('(Input Parameters) Saved!')
-    return samples
-mode = args.mode
-N = args.N
-PATH = os.environ.get("ROOTDIR") + '/' + args.data_path
-parameters_file  = PATH + args.parameters_file
-
-if __name__ == '__main__':
-    f = yaml_load(yaml_string)
-    sys.modules["SimpleBAODVLikelihood"] = sys.modules[__name__]
-    model = get_model(f)
-    
-    prior_params = list(model.parameterization.sampled_params())
-    sampling_dim = len(prior_params)
-    datavectors_file_path = PATH + args.datavectors_file
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    num_ranks = comm.Get_size()
-
-    print('rank',rank,'is at barrier')
-           
-    z = model.likelihood['dummy'].z_data
-    len_z = len(z)
-    num_output = 2
-    SN_DIR = datavectors_file_path + '_baosn.npy'
-    u_bound = model.prior.bounds()[:,1]
-    l_bound = model.prior.bounds()[:,0]
-    if rank == 0:
-        samples = generate_parameters(N, u_bound, l_bound, mode, parameters_file)
-        total_num_dvs = len(samples)
-
-        param_info = samples[0:total_num_dvs:num_ranks]#reading for 0th rank input
-        for i in range(1,num_ranks):#sending other ranks' data
-            comm.send(
-                samples[i:total_num_dvs:num_ranks], 
-                dest = i, 
-                tag  = 1
-            )
-                
-    else:
-            
-        param_info = comm.recv(source = 0, tag = 1)
-
-            
-    num_datavector = len(param_info)
-
-    BAOSN = np.zeros(
-            (num_datavector, len_z, num_output), dtype = "float32"
-        ) 
-
-    for i in range(num_datavector):
-        input_params = model.parameterization.to_input(param_info[i])  
-        try:
-            model.loglike(input_params)
-            theory = list(model.theory.values())[1]
-            H = theory.get_Hubble(z)
-            Dl = theory.get_angular_diameter_distance(z)*(1+z)**2
-                
-        except:
-            print('fail')
-        else:
-            BAOSN[i,:,0] = H
-            BAOSN[i,:,1] = Dl
-            
-
-    if rank == 0:
-        result_baosn   = np.zeros((total_num_dvs, len_z, num_output), dtype="float32")
-        result_baosn[0:total_num_dvs:num_ranks] = BAOSN
-
-        for i in range(1,num_ranks):        
-            result_baosn[i:total_num_dvs:num_ranks] = comm.recv(source = i, tag = 10)
-
-        np.save(SN_DIR, result_baosn)
-            
-    else:    
-        comm.send(BAOSN, dest = 0, tag = 10)
-
-

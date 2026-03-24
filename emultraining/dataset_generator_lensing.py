@@ -807,9 +807,11 @@ class dataset:
       nparams = len(self.samples)
 
       if not self.loadedfromchk:
+        # Allocate failed array begins -----------------------------------------
         self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
         self.failed = np.asarray(self.failed).astype(bool)
-        # Allocate dvs begins --------------------------------------------------
+        
+        # Allocate data vectors begins -----------------------------------------
         try: # First run: get data vector size
           dvs = self._compute_dvs_from_sample(self.samples[0])
         except Exception:
@@ -818,7 +820,8 @@ class dataset:
         nrows = nparams
         ncols = len(dvs)
   
-        RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
+        RAMneed = ( self.samples.nbytes + 
+                    self.failed.nbytes + 
                     nrows*ncols*dvs.dtype.itemsize)
         RAMavail = psutil.virtual_memory().available
         if RAMneed < 0.75 * RAMavail:
@@ -835,12 +838,14 @@ class dataset:
           self.datavectors[:] = 0.0
           self.datavectors.flush()
           self.dvs_is_memmap = True
-        # Allocate dvs end -----------------------------------------------------
-        self.datavectors[0] = dvs
-        self.failed[0] = False
-        idx = np.arange(1, nparams)
+        # Allocate data vectors end --------------------------------------------
+        
+        self.datavectors[0] = dvs   # first data vector was already computed
+        self.failed[0] = False      # first data vector was already computed
+        
+        idx = np.arange(1, nparams) # indexes to compute data vectors
       else:
-        idx = np.where(self.failed == True)[0] 
+        idx = np.where(self.failed == True)[0]  # indexes to compute data vectors
 
       for i in idx:
         try:
@@ -875,9 +880,11 @@ class dataset:
         completed = np.zeros(nparams, dtype=bool)
 
         if not self.loadedfromchk:
+          # Allocate failed array begins ---------------------------------------
           self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
           self.failed = np.asarray(self.failed).astype(bool)
-          # Allocate dvs begins ------------------------------------------------
+          
+          # Allocate data vectors begins ---------------------------------------
           try: # First run: get data vector size
             dvs = self._compute_dvs_from_sample(self.samples[0])
           except Exception:
@@ -889,8 +896,9 @@ class dataset:
           nrows = nparams
           ncols = len(dvs)
 
-          RAMneed = ( self.samples.nbytes + self.failed.nbytes + 
-                      nrows*ncols*dvs.dtype.itemsize)
+          RAMneed = ( self.samples.nbytes + 
+                      self.failed.nbytes + 
+                      nrows*ncols*dvs.dtype.itemsize )
           RAMavail = psutil.virtual_memory().available
           if RAMneed < 0.75 * RAMavail:
             self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
@@ -906,14 +914,15 @@ class dataset:
             self.datavectors[:] = 0.0
             self.datavectors.flush()
             self.dvs_is_memmap = True
-          # Allocate dvs end ---------------------------------------------------
-          self.datavectors[0] = dvs
-          self.failed[0] = False
-          completed[0] = True
-          idx0 = np.arange(1, nparams)
+          # Allocate data vectors end ------------------------------------------
+          
+          self.datavectors[0] = dvs     # first data vector was already computed
+          self.failed[0] = False        # first data vector was already computed
+          completed[0] = True           # first data vector was already computed
+          idx0 = np.arange(1, nparams)  # indexes to compute data vectors
         else:
           completed = ~self.failed
-          idx0 = np.where(self.failed == True)[0]
+          idx0 = np.where(self.failed == True)[0] # indexes to compute data vectors
         
         tasks   = deque(idx0.tolist())
         nactive = min(nworkers, len(tasks))
