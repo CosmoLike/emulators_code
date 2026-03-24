@@ -748,7 +748,7 @@ class dataset:
   def __allocate_data_vector(self, nrows, ncols):
     RAMneed = ( self.samples.nbytes + 
                 self.failed.nbytes + 
-                nrows*ncols*dvs.dtype.itemsize)
+                nrows*ncols*self.dtype)
     RAMavail = psutil.virtual_memory().available
     if RAMneed < 0.75 * RAMavail:
       self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
@@ -758,9 +758,9 @@ class dataset:
             f"There is {RAMavail/1e9:.2f} GB of RAM available. "
             f"We will read dvs from HD (slow)")
       self.datavectors = open_memmap(f"{self.dvsf}.npy", 
-                                     mode="w+",
-                                     shape=(nrows, ncols),
-                                     dtype=self.dtype)
+                                     mode = "w+",
+                                     shape = (nrows, ncols),
+                                     dtype = self.dtype)
       self.datavectors[:] = 0.0
       self.datavectors.flush()
           self.dvs_is_memmap = True
