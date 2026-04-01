@@ -545,8 +545,9 @@ class dataset:
         if len(xf) < self.nparams:
           print(f"Warning: only {len(xf)} unique rows, requested {self.nparams}")
         else:
-          xf  = xf[:self.nparams,:]
-          lnp = lnp[:self.nparams,:]
+          indices = np.random.choice(np.arange(len(xf)), size=self.nparams, replace=False)
+          xf  = xf[indices,:]
+          lnp = lnp[indices,:]
         nparams = len(xf)        
       else:
         nparams  = self.nparams
@@ -748,7 +749,7 @@ class dataset:
   def __allocate_data_vector(self, nrows, ncols):
     RAMneed = ( self.samples.nbytes + 
                 self.failed.nbytes + 
-                nrows*ncols*self.dtype)
+                nrows*ncols*np.dtype(self.dtype).itemsize)
     RAMavail = psutil.virtual_memory().available
     if RAMneed < 0.75 * RAMavail:
       self.datavectors = np.zeros((nrows, ncols), dtype=self.dtype)
@@ -763,7 +764,7 @@ class dataset:
                                      dtype = self.dtype)
       self.datavectors[:] = 0.0
       self.datavectors.flush()
-          self.dvs_is_memmap = True
+      self.dvs_is_memmap = True
 
   def _compute_dvs_from_sample(self, sample):
     # Define fortran errors we want to capture ---------------------------------
