@@ -524,7 +524,8 @@ class dataset:
       
       if not self.unif == 1:
         # high number of samples: make sure we get unique samples
-        nparams  = 40*self.nparams if self.bounds_adj < 1 else 20*self.nparams
+        nparam  = 40*self.nparams if self.bounds_adj < 1 else 20*self.nparams
+        nparams  = max(nparam, 5000000)
         nwalkers = int(10*ndim)
         nsteps   = int(max(7500, nparams/nwalkers)) # (for safety we assume tau>100)
         burnin   = int(0.1*nsteps)                  # 10% burn-in
