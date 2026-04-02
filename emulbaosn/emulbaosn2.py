@@ -166,8 +166,29 @@ class emulbaosn():
                             assume_sorted=True,
                             fill_value="extrapolate")
         zstep = np.linspace(0.0, self.z[0][-1], 2*len(self.z[0])+1)
-        dl    = self.cumulative_simpson(zstep, func(zstep))*(1 + zstep)
-        state[out[i]] = interpolate.interp1d(zstep, dl, 
+        chi   = self.cumulative_simpson(zstep,func(zstep))#*(1 + zstep)
+        zhigh = 1200 #redshift to which we are going to extend by numerical integration
+        NZEXT = 4501 #number of z bins we are going to numerically integrate in the extended region
+        zext = np.linspace(zstep[-1], zhigh, NZEXT) #create the extended z array
+        zfinal = np.concatenate((zstep, zext[1:]))
+        h = params['H0']/100
+        omegar = 3.612711417813115e-05/h/h
+        H_ext = params['H0']*np.sqrt(params['omegam']*(1+zext)**3+omegar*(1+zext)**4) #this is an approximation
+
+        chi_ext = self.cumulative_simpson(zext, 2.99792458e5/H_ext)+chi[-1]
+        chi_final = np.concatenate((chi, chi_ext[1:]))
+        if 'omk' in params:
+            K_abs = abs(params['omk'])*(params['H0']/2.99792458e5)**2
+            if np.isclose(params['omk'], 0.0, atol=1e-12):
+                dl = chi_final*(1 + zfinal)
+            elif params['omk']>0:
+                dl = np.sinh(chi_final*K_abs)/K_abs*(1 + zfinal)
+            else:
+                dl = np.sin(chi_final*K_abs)/K_abs*(1 + zfinal)
+        else:
+            dl = chi_final*(1 + zfinal)
+        
+        state[out[i]] = interpolate.interp1d(zfinal, dl, 
                                              kind='cubic',
                                              assume_sorted=True,
                                              fill_value="extrapolate")(self.z[0])

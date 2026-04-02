@@ -163,4 +163,55 @@ class ResTRF(nn.Module):
         out = self.model(x)
         return out
 
+class ResCNN(nn.Module):
+    # NOTE that this is different than the one in CMB
+    def __init__(self, input_dim, output_dim, int_dim, cnn_dim, kernel_size):
+        super(ResCNN, self).__init__()
+        assert kernel_size%2 != 0 # kernel size should be odd number so that padding is an int
+        self.cnn_dim = cnn_dim   # 1dCNN width needs to be visible by forward pass
 
+        self.input_layer = nn.Linear(input_dim, int_dim)
+        
+        # Def: By design, a pure block has the equal input and output dimension
+        self.Res1 = ResBlock(int_dim, int_dim)
+        self.Res2 = ResBlock(int_dim, int_dim)
+        self.Res3 = ResBlock(int_dim, int_dim)
+
+        self.Act1 = activation_fcn(int_dim)
+        self.Act2 = activation_fcn(int_dim)
+        self.Act3 = activation_fcn(int_dim)
+
+        # Transform from the ResMLP dimension to the CNN dimension
+        self.CNN_transform = nn.Linear(int_dim, cnn_dim)
+
+        self.conv = nn.Conv1d(in_channels=1, out_channels=1, 
+            kernel_size=kernel_size,stride=1,padding=(kernel_size-1)//2)
+
+        self.Act4 = activation_fcn(cnn_dim)
+
+
+        # Def: the transformation from the internal dimension to the output 
+        #      dimension of the data vector we intend to emulate
+        self.out_layer = nn.Linear(cnn_dim, output_dim)
+        self.norm = Affine()
+
+        # NN.SEQUENTIAL is a PYTHORCH function DEFINED AT: https://pytorch.org/docs/stable/generated/torch.nn.Sequential.html
+        # This function stacks up layers in the modules-list in sequence to create the whole model
+
+    def forward(self, x):
+        #x is a cosmological and nuisance parameter set you feed in the model
+        x = self.input_layer(x)
+        x = self.Res1(x)
+        x = self.Act1(x)
+        x = self.Res2(x)
+        x = self.Act2(x)
+        x = self.Res3(x)
+        x = self.Act3(x)
+        x = self.CNN_transform(x)
+        x = x.view(x.size(0), 1, -1)
+        x = self.conv(x)
+        x = x.view(x.size(0), self.cnn_dim)
+        x = self.Act4(x)        
+        x = self.out_layer(x)
+        out = self.norm(x)
+        return out

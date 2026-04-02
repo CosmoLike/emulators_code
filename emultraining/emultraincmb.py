@@ -4,25 +4,35 @@ import numpy as np
 import sys, os
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from cobaya.theories.emulcmb.emulator import ResBlock, ResMLP, TRF, CNNMLP
+from cobaya.likelihood import Likelihood
+import cobaya
+from cobaya.yaml import yaml_load
+from cobaya.model import get_model
+import platform
+import yaml
+class MyPkLikelihood(Likelihood):
 
+    def initialize(self):
+        self.cov=np.load('covmat/cv_fid_cls.npy',allow_pickle=True)
+    def get_requirements(self):
+        return {"Cl": { # DONT REMOVE THIS - SOME WEIRD BEHAVIOR IN CAMB WITHOUT WANTS_CL
+        'tt': 0
+        }}
 
+    def logp(self, **params):
+        
+        return -0.5 
 parser = argparse.ArgumentParser(prog='cos_uniform')
 
-parser.add_argument("--camb_ell_min",
-                    dest="camb_ell_min",
-                    help="Minimal ell mode",
-                    type=int,
+parser.add_argument("--mode",
+                    dest="mode",
+                    help="TT TE or EE",
+                    type=str,
                     nargs='?',
                     const=1,
-                    default=2)
+                    default='tt')
 
-parser.add_argument("--camb_ell_max",
-                    dest="camb_ell_max",
-                    help="Maximal ell mode",
-                    type=int,
-                    nargs='?',
-                    const=1,
-                    default=3000)
+
 
 parser.add_argument("--batch",
                     dest="batch_size",
@@ -39,22 +49,6 @@ parser.add_argument("--epoch",
                     const=1,
                     default=700)
 
-parser.add_argument("--intdim",
-                    dest="intdim",
-                    help="Number of internal dimension for the RsMLP, will be multiplied by 128",
-                    type=int,
-                    nargs='?',
-                    const=1,
-                    default=4)
-
-parser.add_argument("--cnndim",
-                    dest="cnndim",
-                    help="Number of internal dimension for the CNN, Need to be divisible by 16",
-                    type=int,
-                    nargs='?',
-                    const=1,
-                    default=5120)
-
 parser.add_argument("--Path",
                     dest="PATH",
                     help="Saving Directory, no .pt required",
@@ -63,106 +57,177 @@ parser.add_argument("--Path",
                     const=1,
                     default='model')
 
-parser.add_argument("--extrainfo",
-                    dest="extrainfo_file",
-                    help="directory for normalization factor file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='extra.npy')
-
-parser.add_argument("--cov",
-                    dest="cov_file",
-                    help="directory for covariance matrix file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='cov.npy')
-
-parser.add_argument("--traininput",
-                    dest="train_param_file",
-                    help="directory for training input file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='train_input.npy')
-parser.add_argument("--trainoutput",
-                    dest="train_dv_file",
-                    help="directory for training output file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='train_output.npy')
-parser.add_argument("--valiinput",
-                    dest="vali_param_file",
-                    help="directory for validation input file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='vali_input.npy')
-parser.add_argument("--valioutput",
-                    dest="vali_dv_file",
-                    help="directory for validation output file",
-                    type=str,
-                    nargs='?',
-                    const=1,
-                    default='vali_output.npy')
-
-parser.add_argument("--As_index",
-                    dest="As_pos",
-                    help="index for logAs in the input file",
-                    type=int,
-                    nargs='?',
-                    const=1,
-                    default=3)
-
-parser.add_argument("--tau_index",
-                    dest="tau_pos",
-                    help="index for tau in the input file",
-                    type=int,
-                    nargs='?',
-                    const=1,
-                    default=5)
 
 args, unknown = parser.parse_known_args()
-camb_ell_max = args.camb_ell_max
-camb_ell_min = args.camb_ell_min
-cov_file = args.cov_file
-extrainfo_file = args.extrainfo_file
-train_param_file = args.train_param_file
-vali_param_file = args.vali_param_file
-train_dv_file = args.train_dv_file
-vali_dv_file = args.vali_dv_file
+
 PATH = args.PATH
 batch_size = args.batch_size
 n_epoch = args.n_epoch
-cnndim = args.cnndim
-intdim = args.intdim
-As_pos = args.As_pos
-tau_pos = args.tau_pos
 
+
+yaml_string=r"""
+
+likelihood:
+  dummy:
+    class: MyPkLikelihood
+
+params:
+  tau:
+    prior:
+      min: 0.01
+      max: 0.2
+    ref:
+      dist: norm
+      loc: 0.055
+      scale: 0.006
+    proposal: 0.003
+    latex: \tau_\mathrm{reio}
+
+  logA:
+    prior:
+      min: 1.61
+      max: 3.91
+    ref:
+      dist: norm
+      loc: 3.0448
+      scale: 0.05
+    proposal: 3
+    latex: \log(10^{10} A_\mathrm{s})
+    drop: false
+  
+  omegabh2:
+    prior:
+      min: 0.0
+      max: 0.04
+    ref:
+      dist: norm
+      loc: 0.022383
+      scale: 0.005
+    proposal: 0.005
+    latex: \Omega_\mathrm{b} h^2
+  omegach2:
+    prior:
+      min: 0.0
+      max: 0.5
+    ref:
+      dist: norm
+      loc: 0.12011
+      scale: 0.03
+    proposal: 0.03
+    latex: \Omega_\mathrm{c} h^2
+  H0:
+    prior:
+      min: 20
+      max: 120
+    ref:
+      dist: norm
+      loc: 67
+      scale: 2
+    proposal: 0.001
+    latex: H_0
+  
+  ns:
+    prior:
+      min: 0.6
+      max: 1.3
+    ref:
+      dist: norm
+      loc: 0.96605
+      scale: 0.005
+    proposal: 0.005
+    latex: n_\mathrm{s}
+
+
+theory:
+  emulcmb:
+    path: ./cobaya/cobaya/theories/
+    extra_args:
+      # This version of the emul was not trained with CosmoRec
+      eval: [True, True, True, True] #TT,TE,EE,PHIPHI
+      device: "cuda"
+      ord: [['tau','logA','omegabh2','omegach2','H0','ns'],
+            ['tau','logA','omegabh2','omegach2','H0','ns'],
+            ['tau','logA','omegabh2','omegach2','H0','ns'],
+            ['tau','logA','omegabh2','omegach2','H0',ns']]
+      file: ['external_modules/data/emultrf/CMB_TRF/emul_lcdm_CMBTT_CNN.pt',
+             'external_modules/data/emultrf/CMB_TRF/emul_lcdm_CMBTE_CNN.pt',
+             'external_modules/data/emultrf/CMB_TRF/emul_lcdm_CMBEE_CNN.pt', 
+             'external_modules/data/emultrf/CMB_TRF/emul_lcdm_phi_ResMLP.pt']
+      extra: ['external_modules/data/emultrf/CMB_TRF/extra_lcdm_CMBTT_CNN.npy',
+              'external_modules/data/emultrf/CMB_TRF/extra_lcdm_CMBTE_CNN.npy',
+              'external_modules/data/emultrf/CMB_TRF/extra_lcdm_CMBEE_CNN.npy', 
+              'external_modules/data/emultrf/CMB_TRF/extra_lcdm_phi_ResMLP.npy']
+      extrapar: [{'ellmax' : 5000, 'MLA': 'CNN', 'INTDIM': 4, 'INTCNN': 5120},
+                 {'ellmax' : 5000, 'MLA': 'CNN', 'INTDIM': 4, 'INTCNN': 5120},
+                 {'ellmax' : 5000, 'MLA': 'CNN', 'INTDIM': 4, 'INTCNN': 5120}, 
+                 {'MLA': 'ResMLP', 'INTDIM': 4, 'NLAYER': 4, 
+                  'TMAT': 'external_modules/data/emultrf/CMB_TRF/PCA_lcdm_phi.npy'}]
+output: ./projects/axions/chains/EXAMPLE_EVALUATE0
+
+"""
+f = yaml_load(yaml_string)
+sys.modules["MyPkLikelihood"] = sys.modules[__name__]
+
+model = get_model(f)
+mode = args.mode
+if mode=='tt':
+    ind = 0
+elif mode=='te':
+    ind = 1
+elif mode=='ee':
+    ind = 2
+else:
+    print('go to script for phiphi')
+theory = list(model.theory.values())[0]
+ell_max = theory.extrapar[ind]['ellmax']
+int_dim = theory.extrapar[ind]['INTDIM']
+cnn_dim = theory.extrapar[ind]['INTCNN']
+extrainfo_file = theory.extra[ind]
+output_file = theory.file[ind]
+
+train_samples_file = PATH + '/train_params.npy'
+valid_samples_file = PATH + '/valid_params.npy'
+
+train_dv_file = PATH + '/train_dv.npy'
+valid_dv_file = PATH + '/valid_dv.npy'
+
+tau_pos = 0
+As_pos = 1
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if __name__ == '__main__':
 
-    camb_ell_range        = camb_ell_max  - camb_ell_min 
+    camb_ell_range        = ell_max  - 2
     extrainfo = np.load(extrainfo_file,allow_pickle=True)
-    covinv = np.load(cov_file,allow_pickle=True)[:camb_ell_range]*4/np.exp(4*0.06)
+    cl_fid = model.likelihood['dummy'].cov.item()[mode][:camb_ell_range]*2/np.exp(2*0.06)
+    ell = np.arange(2,ell_max,1)
+    covinv = 2/(2*ell+1)*cl_fid**2
     covinv = np.diag(covinv)
-    train_samples = np.load(train_param_file,allow_pickle=True)
+    train_samples = np.load(train_samples_file,allow_pickle=True)
 
     in_size=len(train_samples[0])
     out_size=camb_ell_range
-    validation_samples = np.load(vali_param_file,allow_pickle=True)
+    validation_samples = np.load(valid_samples_file,allow_pickle=True)
 
     train_data_vectors = np.load(train_dv_file,allow_pickle=True,mmap_mode='r+')
     # mmap_mode=r+ for huge files to be read from memory
     # not in RAM
-    validation_data_vectors = np.load(vali_dv_file,allow_pickle=True)
-    X_mean = torch.Tensor(extrainfo.item()['X_mean'])#.to(device)
-    X_std  = torch.Tensor(extrainfo.item()['X_std'])#.to(device)
-    Y_mean = torch.Tensor(extrainfo.item()['Y_mean']).to(device)
-    Y_std  = torch.Tensor(extrainfo.item()['Y_std']).to(device)
+    validation_data_vectors = np.load(valid_dv_file,allow_pickle=True)
+    
+    N_ave = int(0.1*N)
+    X_mean = train_samples.mean(axis=0, keepdims=True)
+    X_std = train_samples.std(axis=0, keepdims=True)
+    Y_mean = train_data_vectors.mean(axis=0, keepdims=True)
+    Y_std = train_data_vectors.std(axis=0, keepdims=True)
+    extrainfo={'X_mean':X_mean,'X_std':X_std,'Y_mean':Y_mean,'Y_std':Y_std}
+    np.save(extrainfo_file,extrainfo)
+    
+
+
+    X_mean = torch.Tensor(X_mean)#.to(device)
+    X_std  = torch.Tensor(X_std)#.to(device)
+    Y_mean = torch.Tensor(Y_mean).to(device)
+    Y_std  = torch.Tensor(Y_std).to(device)
 
 
     covinv = torch.Tensor(covinv).to(device) #This is inverse of the Covariance Matrix
@@ -267,18 +332,7 @@ if __name__ == '__main__':
 
     torch.save(model.state_dict(), PATH+'.pt')
 #    CUDA_VISIBLE_DEVICES=0 python emultraincmb.py \
-#    --camb_ell_min 2\
-#    --camb_ell_max 3000\
+#    --mode 'tt' \
 #    --batch 512 \
 #    --epoch 700 \
-#    --intdim 4 \
-#    --cnndim 3120\
 #    --Path 'model' \
-#    --extrainfo 'extra.npy' \
-#    --cov 'cov.npy' \
-#    --traininput 'traininput.npy' \
-#    --trainoutput 'trainoutput.npy' \
-#    --valiinput 'valiinput.npy' \
-#    --valioutput 'valioutput.npy' \
-#    --As_index 3
-#    --tau_index 5

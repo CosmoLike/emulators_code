@@ -7,18 +7,6 @@ from cobaya.theories.emulbaosn.emulator import ResBlock, ResMLP
 from scipy import interpolate
 from typing import Mapping, Iterable
 from cobaya.typing import empty_dict, InfoDict
-try:
-    import torch_xla.core.xla_model as xm
-    _tpu_ok = bool(xm.get_xla_supported_devices("TPU"))
-except Exception:
-    xm, _tpu_ok = None, False
-
-def get_device(dev: str):
-    if dev == "tpu":
-        if xm is None or not _tpu_ok:
-            raise RuntimeError("TPU requested but torch_xla is not available.")
-        return xm.xla_device()
-    return torch.device(dev)
 
 class emulbaosn(Theory):
     renames: Mapping[str, str] = empty_dict
@@ -33,17 +21,8 @@ class emulbaosn(Theory):
         for name in ("M", "info", "ord", "z", "tmat", "extrapar", "offset"):
             setattr(self, name, [None] * self.imax)
         self.req = [] 
-        self.device = "cpu" if (d := self.extra_args.get("device")) is None else d.lower()
-        self.device = (
-            "cuda" if ((req := self.device) == "cuda" and torch.cuda.is_available()) 
-            else "mps" if (req in ("cuda","mps") 
-                        and hasattr(torch.backends, "mps") 
-                        and torch.backends.mps.is_built() 
-                        and torch.backends.mps.is_available()) 
-            else "tpu" if (req in ("cuda","tpu") and _tpu_ok)
-            else "cpu"
-        )
-        self.device = get_device(self.device)        
+        
+        self.device = "cuda" if self.extra_args.get("device") == "cuda" and torch.cuda.is_available() else "cpu"
         
         # BASIC CHECKS BEGINS --------------------------------------------------
         _required_lists = [
@@ -191,9 +170,34 @@ class emulbaosn(Theory):
                                      assume_sorted=True,
                                      fill_value="extrapolate")
         zstep = np.linspace(0.0, self.z[0][-1], 2*len(self.z[0])+1)
-        dl    = self.cumulative_simpson(zstep,func(zstep))*(1 + zstep)
-        state["da_interp"] = interpolate.interp1d(zstep, 
-                                                  dl/(1.0+zstep)**2,
+        
+
+        chi   = self.cumulative_simpson(zstep,func(zstep))
+        zhigh = 1200 #redshift to which we are going to extend by numerical integration
+        NZEXT = 4501 #number of z bins we are going to numerically integrate in the extended region
+        zext = np.linspace(zstep[-1], zhigh, NZEXT) #create the extended z array
+        zfinal = np.concatenate((zstep, zext[1:]))
+        h = params['H0']/100
+        omegar = 3.612711417813115e-05/h/h
+        H_ext = params['H0']*np.sqrt(params['omegam']*(1+zext)**3+omegar*(1+zext)**4) #this is an approximation
+        #omegal = 1-params['omegam']-omegar
+        #H_ext = state["H_interp"](zstep[-1])*np.sqrt(params['omegam']*(1+zext)**3+omegar*(1+zext)**4+omegal)/np.sqrt(params['omegam']*(1+zstep[-1])**3+omegar*(1+zstep[-1])**4+omegal)
+        chi_ext = self.cumulative_simpson(zext, 2.99792458e5/H_ext)+chi[-1]
+        chi_final = np.concatenate((chi, chi_ext[1:]))
+        if 'omk' in params:
+            K_abs = abs(params['omk'])*(params['H0']/2.99792458e5)**2
+            if np.isclose(params['omk'], 0.0, atol=1e-12):
+                dl = chi_final*(1 + zfinal)
+            elif params['omk']>0:
+                dl = np.sinh(chi_final*K_abs)/K_abs*(1 + zfinal)
+            else:
+                dl = np.sin(chi_final*K_abs)/K_abs*(1 + zfinal)
+        else:
+            dl = chi_final*(1 + zfinal)
+        
+
+        state["da_interp"] = interpolate.interp1d(zfinal, 
+                                                  dl/(1.0+zfinal)**2,
                                                   kind='cubic',
                                                   assume_sorted=True,
                                                   fill_value="extrapolate")

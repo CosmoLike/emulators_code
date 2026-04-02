@@ -157,4 +157,4 @@ class emultheta(Theory):
 
     def get_omegab(self):
         state = self.current_state.copy()
-        return state["omegam"]
+        return state["omegab"]

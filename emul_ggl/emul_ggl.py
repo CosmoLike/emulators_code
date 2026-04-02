@@ -2,7 +2,7 @@ import torch, os, sys
 import torch.nn as nn
 import numpy as np
 from cobaya.theory import Theory
-from cobaya.theories.emul_ggl.emulator import ResTRF
+from cobaya.theories.emul_ggl.emulator import ResTRF, ResCNN
 from typing import Mapping, Iterable
 from cobaya.typing import empty_dict, InfoDict
 import h5py as h5
@@ -84,7 +84,13 @@ class emul_ggl(Theory):
                     # so that we can check that ordering is correct!
                     # we can save users from a simple mistake this way
             # invert the rotation matrix so that we don't do it every time we evaluate
-            self.inv_dv_evecs[i] = torch.linalg.inv(self.dv_evecs[i])
+            #self.inv_dv_evecs[i] = torch.linalg.inv(self.dv_evecs[i])
+            if self.device.type == "mps":
+                A = self.dv_evecs[i].detach().to("cpu")
+                inv_cpu = torch.linalg.inv(A)
+                self.inv_dv_evecs[i] = inv_cpu.to(self.device)
+            else:
+                self.inv_dv_evecs[i] = torch.linalg.inv(self.dv_evecs[i])
 
             self.ord[i] = self.extra_args.get('ord')[i]
 
@@ -94,6 +100,16 @@ class emul_ggl(Theory):
                                    int_dim_res = self.extrapar[i]['INT_DIM_RES'],
                                    int_dim_trf = self.extrapar[i]['INT_DIM_TRF'],
                                    N_channels  = self.extrapar[i]['NC_TRF'])
+            elif self.extrapar[i]['MLA'] == 'CNN':
+                self.M[i] = ResCNN(input_dim = len(self.ord[i]),
+                                   output_dim = self.extrapar[i]['OUTPUT_DIM'],
+                                   int_dim = self.extrapar[i]['INT_DIM_RES'],
+                                   cnn_dim = self.extrapar[i]['CNN_DIM'],
+                                   kernel_size = self.extrapar[i]['KERNEL_DIM'])
+            else:
+                print("MLA must be one of [TRF, CNN]")
+                exit()
+                
             self.M[i] = self.M[i].to(self.device)
             self.M[i].load_state_dict(torch.load(self.extra_args.get('file')[i],map_location=self.device))
             self.M[i] = self.M[i].eval()
@@ -109,13 +125,13 @@ class emul_ggl(Theory):
         return self.req
 
     def predict_data_vector(self, X, i):
-        X = torch.Tensor(X).to(self.device)
+        X = torch.tensor(X, dtype=self.X_mean[i].dtype, device=self.device)
         with torch.no_grad():
-            X_norm = torch.nan_to_num((X-self.X_mean[i])/self.X_std[i],nan=0).to(self.device)
-            M_pred = self.M[i](X_norm).to(self.device)
-        res = (M_pred*self.dv_evals[i]) @ self.inv_dv_evecs[i] + self.Y_mean[i]
-        return res[0].cpu().detach().numpy()
-
+            X_norm = torch.nan_to_num((X - self.X_mean[i]) / self.X_std[i], nan=0.0)
+            M_pred = self.M[i](X_norm)
+        res = (M_pred * self.dv_evals[i]) @ self.inv_dv_evecs[i] + self.Y_mean[i]
+        return res[0].detach().cpu().numpy()
+    
     def calculate(self, state, want_derived=True, **params):
         i = 0
         X = [params[p] for p in self.ord[i]]
