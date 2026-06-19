@@ -371,7 +371,7 @@ class emulmps(Theory):
                 emul_params, use_syren=self.use_syren
             )
 
-            if not np.all(np.isfinite(Pk_lin_mpc)) or np.any(Pk_lin_mpc <= 0):
+            if not np.all(np.isfinite(Pk_lin_mpc)) or np.any(~(Pk_lin_mpc > 0)):
                 self.log.debug(f"Non-finite or non-positive Pk_lin at params={params} — rejecting point.")
                 return False
 
@@ -380,7 +380,7 @@ class emulmps(Theory):
             # ------------------------------------------------------------------
             _, _, boost = self._emulator.get_boost(emul_params, pk_lin=Pk_lin_mpc, use_syren=self.use_syren)
 
-            if not np.all(np.isfinite(boost)) or np.any(boost <= 0):
+            if not np.all(np.isfinite(boost)) or np.any(~(boost > 0)):
                 self.log.debug(
                     f"Non-finite or non-positive boost at params={params} — "
                     "rejecting point."
@@ -389,7 +389,7 @@ class emulmps(Theory):
 
             Pk_nl_mpc  = (boost * Pk_lin_mpc).astype(np.float32)
 
-            if not np.all(np.isfinite(Pk_nl_mpc)) or np.any(Pk_nl_mpc <= 0):
+            if not np.all(np.isfinite(Pk_nl_mpc)) or np.any(~(Pk_nl_mpc > 0)):
                 self.log.debug(
                     f"Non-finite or non-positive Pk_nl at params={params} — "
                     "rejecting point."

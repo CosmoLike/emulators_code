@@ -22,11 +22,21 @@ from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
 import sys
 from . import train_utils_pk_emulator as utils
-sys.modules['train_utils_pk_emulator'] = utils
-sys.modules['train_utils_pk_emulator_v2'] = utils
 from . train_utils_pk_emulator import CustomActivationLayer, TComponentScaler
 import tensorflow as tf
 
+class _AliasLoader:
+    """Redirect any train_utils_pk_emulator_vN import to the canonical module."""
+    def find_module(self, name, path=None):
+        if name.startswith('train_utils_pk_emulator'):
+            return self
+    
+    def load_module(self, name):
+        if name not in sys.modules:
+            sys.modules[name] = utils
+        return sys.modules[name]
+    
+sys.meta_path.append(_AliasLoader())
 
 # --- Custom warning class ---
 class EmulatorWarning(UserWarning):
@@ -606,7 +616,6 @@ class PkEmulator:
     def has_nl_model(self) -> bool:
         """Return True if a nonlinear boost model has been loaded."""
         return self._nl_model is not None
-
 
 # --- Public Module-Level Interface ---
 
