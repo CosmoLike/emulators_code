@@ -896,6 +896,7 @@ class dataset:
             sys.stderr.write(f"Failed in _compute_dvs_from_sample for idx=0\n" 
                              f"Cannot determine datavector length\n"
                              f"aborting MPI job\n")
+            sys.stderr.write(traceback.format_exc())   # <-- the actual cause
             sys.stderr.flush()
             comm.Abort(1)
           nrows = nparams
