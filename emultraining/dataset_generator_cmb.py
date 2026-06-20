@@ -287,7 +287,7 @@ class dataset:
 
     self.sampled_params = train_args['ord'] # preferred ordering of params
 
-    self.derived = train_args['derived'] if 'derived' in train_args else []
+    #self.derived = train_args['derived'] if 'derived' in train_args else []
 
     self.lrange = np.array(train_args['lrange'], dtype=int)
 
@@ -319,6 +319,9 @@ class dataset:
       
     # Reorder bounds -----------------------------------------------------------
     self.names = list(self.model.parameterization.sampled_params().keys())
+    if set(self.sampled_params) != set(self.names):
+      raise ValueError(f"train_args.ord {set(self.sampled_params)}"
+                       f" != model sampled params {set(self.names)}")
     idx = self.reorder_idx_from_yaml_to_ord()
     
     # Here T (temp) stretch the hard bounds on parameters with Gaussian prior --
@@ -850,8 +853,8 @@ class dataset:
             except Exception:
               pass
       elif (self.probe == "cmbunlensed" and
-            hasattr(x,'get_Cl') and
-            callable(getattr(x,'get_Cl'))):   
+            hasattr(x,'get_unlensed_Cl') and
+            callable(getattr(x,'get_unlensed_Cl'))):   
         cmb = x.get_unlensed_Cl()
         out[:,0] = cmb["tt"][self.lrange[0]:self.lrange[1]+1]
         out[:,1] = cmb["te"][self.lrange[0]:self.lrange[1]+1]
@@ -1019,7 +1022,7 @@ class dataset:
                 completed[idx] = True
               self.__save_chk() # save before crashing
               comm.Abort(1) 
-            time.sleep(.1) # avoid 100% CPU usage
+            time.sleep(.005) # avoid 100% CPU usage
         # end of while loop  
 
         # drain last tasks from active MPI workers -----------------------------
@@ -1058,7 +1061,7 @@ class dataset:
                 completed[idx] = True
               self.__save_chk() # save before crashing
               comm.Abort(1)
-            time.sleep(.1) # avoid 100% CPU usage    
+            time.sleep(.005) # avoid 100% CPU usage    
         # end active workers
         
         # stop workers ---------------------------------------------------------
@@ -1082,7 +1085,7 @@ class dataset:
                 sys.stderr.write(f"[Rank 0] Worker {w} timed out (MPI DTAG)")
                 sys.stderr.flush()
                 comm.Abort(1)
-            time.sleep(.1) # avoid 100% CPU usage
+            time.sleep(.005) # avoid 100% CPU usage
         # end stop workers
       
       else:
@@ -1092,7 +1095,7 @@ class dataset:
           while not comm.Iprobe(source=0, 
                                 tag=MPI.ANY_TAG, 
                                 status=status):
-            time.sleep(0.05) # ~0% CPU while rank 0 runs the MCMC
+            time.sleep(.005) # ~0% CPU while rank 0 runs the MCMC
           idx, sample = comm.recv(source = 0, 
                                   tag = MPI.ANY_TAG, 
                                   status = status) # try block on main b/c if
