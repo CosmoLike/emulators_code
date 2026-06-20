@@ -1,5 +1,5 @@
 import numpy as np
-import emcee, argparse, os, sys, yaml, time, traceback 
+import emcee, argparse, os, sys, yaml, time, traceback
 import psutil, gc, math, copy, tempfile
 from cobaya.model import get_model
 from mpi4py import MPI
@@ -216,7 +216,7 @@ class dataset:
     self.covmat = None 
     self.dtype = np.float32
     self.dvsf = None 
-    self.derived = None
+    self.derived = True
     self.dvs_is_memmap = False
     self.freqchk = 5000 if args.freqchk is None else args.freqchk
     if self.freqchk < 1000:
@@ -290,7 +290,7 @@ class dataset:
     self.derived = train_args['derived'] if 'derived' in train_args else []
 
     self.lrange = np.array(train_args['lrange'], dtype=int)
-    
+
     if not self.unif == 1:
       fid = train_args["fiducial"] # load fiducial data vector
       
@@ -389,7 +389,23 @@ class dataset:
       self.dvsf = f"{root}/chains/{datavsfile}_{self.probe}_unifs"
       self.paramsf = f"{root}/chains/{paramfile}_{self.probe}_unifs"
       self.failf = f"{root}/chains/{failfile}_{self.probe}_unifs"
-    
+
+    #---------------------------------------------------------------------------
+    # Validate fiducial is inside the sampling bounds (Gaussian sampling only)
+    #---------------------------------------------------------------------------
+    if not self.unif == 1:
+      lp = self.__param_logpost(self.fiducial)
+      if not math.isfinite(lp):
+        oob = {p: (float(v), float(lo), float(hi))
+               for p, v, lo, hi in zip(self.sampled_params, self.fiducial,
+                                       self.bounds[:, 0], self.bounds[:, 1])
+               if not (lo <= v <= hi)}
+        raise ValueError(
+          f"train_args.fiducial has a non-finite log-posterior ({lp}): it lies "
+          f"outside the (temperature-stretched) sampling bounds. Fix the fiducial "
+          f"or widen the corresponding prior.\n"
+          f"Offending params [name: (value, low, high)]: {oob}")
+
     #---------------------------------------------------------------------------
     # Setup Done
     #---------------------------------------------------------------------------
@@ -553,7 +569,14 @@ class dataset:
           indices = np.random.choice(np.arange(len(xf)), size=self.nparams, replace=False)
           xf  = xf[indices,:]
           lnp = lnp[indices,:]
-        nparams = len(xf)        
+        nparams = len(xf)
+        # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
+        for i, x in enumerate(xf):
+          logprior = self.model.prior.logp(x[idx])
+          if math.isinf(logprior):
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
+                               f"Values: {dict(zip(self.sampled_params, x))}")       
       else:
         nparams  = self.nparams
         bds = self.bounds.copy()
@@ -565,15 +588,14 @@ class dataset:
                                 size = (nparams,ndim))
         lnp = np.ones((nparams,1), dtype=self.dtype)
         # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
         for i, x in enumerate(xf):
-          idx = self.reorder_idx_from_ord_to_yaml()
           logprior = self.model.prior.logp(x[idx])
           if math.isinf(logprior):
-              raise ValueError(f"Sample {i} has -inf prior. (should not happen)"
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
                                f"Values: {dict(zip(self.sampled_params, x))}")
       w = np.ones((nparams,1), dtype=self.dtype)
       chi2 = -2*lnp
-
       if not loadedfromchk:
         # Output some debug messaging ------------------------------------------
         if not self.unif == 1:
@@ -712,14 +734,14 @@ class dataset:
                                     mode = "w+",
                                     shape = (nrows + nparams, ncols, nstride),
                                     dtype = self.datavectors.dtype)
-          for s in range(0, nrows, 2500): # read dvs in chunks: avoid RAM spikes 
+          for s in range(0, nrows, 2500): # read dvs in chunks: avoid RAM spikes
             e = min(nrows, s + 2500)
             datavectors[s:e] = self.datavectors[s:e]
           for s in range(nrows, nrows + nparams, 2500):
             e = min(nrows + nparams, s + 2500)
             datavectors[s:e] = 0
           # save (flush) data vector (in-place) --------------------------------
-          datavectors.flush() 
+          datavectors.flush()
           del datavectors
           # save data vector file (from tmp) -----------------------------------
           os.replace(f"{self.dvsf}.tmp.npy", f"{self.dvsf}.npy")
@@ -748,11 +770,11 @@ class dataset:
         self.loadedfromchk = True
     # set self.loadedsamples ---------------------------------------------------
     self.loadedsamples = True
-  
+
   #-----------------------------------------------------------------------------
   # datavectors
   #-----------------------------------------------------------------------------
-  def __allocate_data_vector(self, nrows, ncols, nstride):  
+  def __allocate_data_vector(self, nrows, ncols, nstride):
     RAMneed = ( self.samples.nbytes + 
                 self.failed.nbytes + 
                 nrows*ncols*nstride*np.dtype(self.dtype).itemsize )
@@ -865,7 +887,7 @@ class dataset:
 
       if not self.loadedfromchk:
         # Allocate failed array begins -----------------------------------------
-        self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
+        self.failed = np.ones(nparams, dtype = np.uint8) # start w/ all failed
         self.failed = np.asarray(self.failed).astype(bool)
         
         # Allocate data vectors begins -----------------------------------------
@@ -1064,9 +1086,13 @@ class dataset:
         # end stop workers
       
       else:
-      
         status = MPI.Status()
         while (True):
+          # poll politely instead of busy-waiting in a blocking recv
+          while not comm.Iprobe(source=0, 
+                                tag=MPI.ANY_TAG, 
+                                status=status):
+            time.sleep(0.05) # ~0% CPU while rank 0 runs the MCMC
           idx, sample = comm.recv(source = 0, 
                                   tag = MPI.ANY_TAG, 
                                   status = status) # try block on main b/c if
