@@ -60,7 +60,8 @@ class emulrdrag(Theory):
         p =  np.array([par[key] for key in params]) - X_mean     
         rd = self.M[0].predict(p/X_std)[0]*Y_std[0] + Y_mean[0]
         state.update({'rdrag':rd})
-        state["derived"].update({'rdrag':rd})
+        if state["derived"] is not None:
+            state["derived"].update({'rdrag':rd})
         return True
 
     def get_rdrag(self):

@@ -192,9 +192,7 @@ class dataset:
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     if rank == 0:
-      print("checkpoint of code - run mcmc")
       self.__run_mcmc()
-      print("checkpoint of code - run mcmc end")
     if not args.chain == 1:
       self.__generate_datavectors()
 
@@ -218,7 +216,7 @@ class dataset:
     self.covmat = None 
     self.dtype = np.float32
     self.dvsf = None 
-    self.derived = None
+    self.derived = True
     self.dvs_is_memmap = False
     self.freqchk = 5000 if args.freqchk is None else args.freqchk
     if self.freqchk < 1000:
@@ -386,7 +384,22 @@ class dataset:
       self.dvsf = f"{root}/chains/{datavsfile}_{self.probe}_unifs"
       self.paramsf = f"{root}/chains/{paramfile}_{self.probe}_unifs"
       self.failf = f"{root}/chains/{failfile}_{self.probe}_unifs"
-    
+
+    #---------------------------------------------------------------------------
+    # Validate fiducial is inside the sampling bounds (Gaussian sampling only)
+    #---------------------------------------------------------------------------
+    if not self.unif == 1:
+      lp = self.__param_logpost(self.fiducial)
+      if not math.isfinite(lp):
+        oob = {p: (float(v), float(lo), float(hi))
+               for p, v, lo, hi in zip(self.sampled_params, self.fiducial,
+                                       self.bounds[:, 0], self.bounds[:, 1])
+               if not (lo <= v <= hi)}
+        raise ValueError(
+          f"train_args.fiducial has a non-finite log-posterior ({lp}): it lies "
+          f"outside the (temperature-stretched) sampling bounds. Fix the fiducial "
+          f"or widen the corresponding prior.\n"
+          f"Offending params [name: (value, low, high)]: {oob}")
     #---------------------------------------------------------------------------
     # Setup Done
     #---------------------------------------------------------------------------
@@ -551,7 +564,14 @@ class dataset:
           indices = np.random.choice(np.arange(len(xf)), size=self.nparams, replace=False)
           xf  = xf[indices,:]
           lnp = lnp[indices,:]
-        nparams = len(xf)        
+        nparams = len(xf) 
+        # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
+        for i, x in enumerate(xf):
+          logprior = self.model.prior.logp(x[idx])
+          if math.isinf(logprior):
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
+                               f"Values: {dict(zip(self.sampled_params, x))}")       
       else:
         nparams  = self.nparams
         bds = self.bounds.copy()
@@ -563,15 +583,14 @@ class dataset:
                                 size = (nparams,ndim))
         lnp = np.ones((nparams,1), dtype=self.dtype)
         # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
         for i, x in enumerate(xf):
-          idx = self.reorder_idx_from_ord_to_yaml()
           logprior = self.model.prior.logp(x[idx])
           if math.isinf(logprior):
-              raise ValueError(f"Sample {i} has -inf prior. (should not happen)"
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
                                f"Values: {dict(zip(self.sampled_params, x))}")
       w = np.ones((nparams,1), dtype=self.dtype)
       chi2 = -2*lnp
-
       if not loadedfromchk:
         # Output some debug messaging ------------------------------------------
         if not self.unif == 1:
