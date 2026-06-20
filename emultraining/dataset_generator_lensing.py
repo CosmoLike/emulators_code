@@ -1,5 +1,5 @@
 import numpy as np
-import emcee, argparse, os, sys, yaml, time, traceback 
+import emcee, argparse, os, sys, yaml, time, traceback
 import psutil, gc, math, copy, tempfile
 from cobaya.model import get_model
 from mpi4py import MPI
@@ -216,7 +216,7 @@ class dataset:
     self.covmat = None 
     self.dtype = np.float32
     self.dvsf = None 
-    self.derived = None
+    self.derived = True
     self.dvs_is_memmap = False
     self.freqchk = 5000 if args.freqchk is None else args.freqchk
     if self.freqchk < 1000:
@@ -384,7 +384,23 @@ class dataset:
       self.dvsf = f"{root}/chains/{datavsfile}_{self.probe}_unifs"
       self.paramsf = f"{root}/chains/{paramfile}_{self.probe}_unifs"
       self.failf = f"{root}/chains/{failfile}_{self.probe}_unifs"
-    
+
+    #---------------------------------------------------------------------------
+    # Validate fiducial is inside the sampling bounds (Gaussian sampling only)
+    #---------------------------------------------------------------------------
+    if not self.unif == 1:
+      lp = self.__param_logpost(self.fiducial)
+      if not math.isfinite(lp):
+        oob = {p: (float(v), float(lo), float(hi))
+               for p, v, lo, hi in zip(self.sampled_params, self.fiducial,
+                                       self.bounds[:, 0], self.bounds[:, 1])
+               if not (lo <= v <= hi)}
+        raise ValueError(
+          f"train_args.fiducial has a non-finite log-posterior ({lp}): it lies "
+          f"outside the (temperature-stretched) sampling bounds. Fix the fiducial "
+          f"or widen the corresponding prior.\n"
+          f"Offending params [name: (value, low, high)]: {oob}")
+
     #---------------------------------------------------------------------------
     # Setup Done
     #---------------------------------------------------------------------------
@@ -462,11 +478,10 @@ class dataset:
           raise ValueError(f"datavectors must be 2D, got {self.datavectors.shape}") 
         if self.datavectors.shape[0] != self.samples.shape[0]:
           raise ValueError(f"Incompatible samples/datavector chk files")
-        if loadchk: 
-          print("Loaded models from chk")
-          if self.append == 0:
-            self.loadedsamples = True
-            self.loadedfromchk = True
+        print("Loaded models from chk")
+        if self.append == 0:
+          self.loadedsamples = True
+          self.loadedfromchk = True
         rtnvar = True
     return rtnvar
   
@@ -549,7 +564,14 @@ class dataset:
           indices = np.random.choice(np.arange(len(xf)), size=self.nparams, replace=False)
           xf  = xf[indices,:]
           lnp = lnp[indices,:]
-        nparams = len(xf)        
+        nparams = len(xf)
+        # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
+        for i, x in enumerate(xf):
+          logprior = self.model.prior.logp(x[idx])
+          if math.isinf(logprior):
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
+                               f"Values: {dict(zip(self.sampled_params, x))}")       
       else:
         nparams  = self.nparams
         bds = self.bounds.copy()
@@ -561,15 +583,14 @@ class dataset:
                                 size = (nparams,ndim))
         lnp = np.ones((nparams,1), dtype=self.dtype)
         # Double check that prior is not -infty --------------------------------
+        idx = self.reorder_idx_from_ord_to_yaml()
         for i, x in enumerate(xf):
-          idx = self.reorder_idx_from_ord_to_yaml()
           logprior = self.model.prior.logp(x[idx])
           if math.isinf(logprior):
-              raise ValueError(f"Sample {i} has -inf prior. (should not happen)"
+              raise ValueError(f"Sample {i} has -inf prior. (this should not happen)"
                                f"Values: {dict(zip(self.sampled_params, x))}")
       w = np.ones((nparams,1), dtype=self.dtype)
       chi2 = -2*lnp
-
       if not loadedfromchk:
         # Output some debug messaging ------------------------------------------
         if not self.unif == 1:
@@ -688,7 +709,6 @@ class dataset:
                     self.datavectors.nbytes + 
                     (nrows + nparams)*ncols*self.datavectors.dtype.itemsize)
         RAMavail = psutil.virtual_memory().available
-        
         if RAMneed < 0.75 * RAMavail:
           # setup new datavector numpy array -----------------------------------
           self.datavectors = np.vstack((self.datavectors, 
@@ -743,7 +763,7 @@ class dataset:
         self.loadedfromchk = True
     # set self.loadedsamples ---------------------------------------------------
     self.loadedsamples = True
-  
+
   #-----------------------------------------------------------------------------
   # datavectors
   #-----------------------------------------------------------------------------
@@ -785,16 +805,16 @@ class dataset:
 
     # Compute data vector (within using cobaya API) ----------------------------
     likelihood = self.model.likelihood[list(self.model.likelihood.keys())[0]]
-    
+
     captured = 0 # variable that will hold terminal output 
     with capture_native_output() as tmp:
       for (x, _), z in zip(self.model._component_order.items(),
                            self.model._params_of_dependencies):
         x.check_cache_and_compute(
-            params_values_dict=dict({p: param[p] for p in x.input_params}),
-            want_derived=self.derived,
-            dependency_params=list(param.keys()),
-            cached=True
+            params_values_dict = dict({p: param[p] for p in x.input_params}),
+            want_derived = self.derived,
+            dependency_params = list(param.keys()),
+            cached = True
         )
       tmp.seek(0)
       captured = tmp.read() # copy terminal output -----------------------------
@@ -829,7 +849,7 @@ class dataset:
 
       if not self.loadedfromchk:
         # Allocate failed array begins -----------------------------------------
-        self.failed = np.ones(nparams, dtype=np.uint8) # start w/ all failed
+        self.failed = np.ones(nparams, dtype = np.uint8) # start w/ all failed
         self.failed = np.asarray(self.failed).astype(bool)
         
         # Allocate data vectors begins -----------------------------------------
@@ -845,10 +865,10 @@ class dataset:
         
         self.datavectors[0] = dvs   # first data vector was already computed
         self.failed[0] = False      # first data vector was already computed
-        
+
         idx = np.arange(1, nparams) # indexes to compute data vectors
       else:
-        idx = np.where(self.failed == True)[0]  # indexes to compute data vectors
+        idx = np.where(self.failed == True)[0] # indexes to compute data vectors
 
       for i in idx:
         try:
@@ -864,7 +884,6 @@ class dataset:
           sys.stderr.flush()
           continue
         self.datavectors[i] = dvs
-
         if i % self.freqchk == 0 and i > 0:
           print(f"Model number: {i+1} (total: {nparams}) - checkpoint", flush=True)
           self.__save_chk()
@@ -894,13 +913,14 @@ class dataset:
             sys.stderr.write(f"Failed in _compute_dvs_from_sample for idx=0\n" 
                              f"Cannot determine datavector length\n"
                              f"aborting MPI job\n")
+            sys.stderr.write(traceback.format_exc())   # <-- the actual cause
             sys.stderr.flush()
             comm.Abort(1)
           nrows = nparams
           ncols = len(dvs)
           self.__allocate_data_vector(nrows=nrows, ncols=ncols)
           # Allocate data vectors end ------------------------------------------
-          
+
           self.datavectors[0] = dvs     # first data vector was already computed
           self.failed[0] = False        # first data vector was already computed
           completed[0] = True           # first data vector was already computed
@@ -996,7 +1016,7 @@ class dataset:
               self.datavectors[idx,:] = 0.0
               self.failed[idx] = True
               sys.stderr.write(f"[Rank 0] Worker {src} failed at idx={idx}\n"
-                               f"Reason: {payload}\n")
+                               f"(MPI) Msg: {payload}\n")
               sys.stderr.flush()
             else:
               self.datavectors[idx] = payload 
@@ -1046,9 +1066,13 @@ class dataset:
         # end stop workers
       
       else:
-      
         status = MPI.Status()
         while (True):
+          # poll politely instead of busy-waiting in a blocking recv
+          while not comm.Iprobe(source=0, 
+                                tag=MPI.ANY_TAG, 
+                                status=status):
+            time.sleep(0.05) # ~0% CPU while rank 0 runs the MCMC
           idx, sample = comm.recv(source = 0, 
                                   tag = MPI.ANY_TAG, 
                                   status = status) # try block on main b/c if
