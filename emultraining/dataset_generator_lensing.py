@@ -192,7 +192,9 @@ class dataset:
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     if rank == 0:
+      print("checkpoint of code - run mcmc")
       self.__run_mcmc()
+      print("checkpoint of code - run mcmc end")
     if not args.chain == 1:
       self.__generate_datavectors()
 
@@ -1046,9 +1048,13 @@ class dataset:
         # end stop workers
       
       else:
-      
         status = MPI.Status()
         while (True):
+          # poll politely instead of busy-waiting in a blocking recv
+          while not comm.Iprobe(source=0, 
+                                tag=MPI.ANY_TAG, 
+                                status=status):
+            time.sleep(0.05) # ~0% CPU while rank 0 runs the MCMC
           idx, sample = comm.recv(source = 0, 
                                   tag = MPI.ANY_TAG, 
                                   status = status) # try block on main b/c if
