@@ -1,9 +1,7 @@
 # Cosmic-shear data-vector emulator
 
 A neural emulator that maps cosmological parameters to the masked cosmic-shear
-(`xi`) data vector, trained against the full-3x2pt chi2 from cosmolike. Ported
-from `pytorch1.ipynb` into a library (`emulator/`) plus CLI driver scripts that
-sit beside it.
+(`xi`) data vector, trained against the full-3x2pt chi2 from cosmolike.
 
 One line: raw dumps → stage → whiten params (input) and data vector (output) →
 ResMLP / ResCNN → chi2 loss → train. `EmulatorExperiment` wires it together; each
@@ -63,10 +61,11 @@ emulator/                              the library (pure torch, except geometrie
   diagnostics.py                       coverage, local-linear floor, hard-direction fits
   parallel/  PCE/  IA/                 experimental variants (section 5)
 
-train_single_*.{py,yaml}               CLI: one training run (+ optional diagnostics PDF)
-tune_single_*.{py,yaml}                CLI: Optuna hyperparameter search
+train_single_*.py                      CLI: one training run (+ optional diagnostics PDF)
+tune_single_*.py                       CLI: Optuna hyperparameter search
 sweep_ntrain_*.py                      CLI: f(dchi2 > thr) vs N_train   (multi-GPU)
 bakeoff_activation_*.py                CLI: one curve per activation    (multi-GPU)
+example_yamls/                         template YAMLs; copy one into a project's --fileroot
 ```
 
 The driver scripts sit beside `emulator/` (no `driver/` subfolder): launching one
@@ -414,7 +413,8 @@ The YAML has two blocks: `data` (bare input filenames resolved under
 `optimizer` / `lr` / `scheduler` / `trim` / `focus` sub-blocks). Pick the model
 with `train_args.model.name` (`resmlp` | `rescnn`). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
-list is searched.
+list is searched. Templates live in `example_yamls/`; copy one into your
+`--fileroot` (e.g. as `test.yaml`) and edit it.
 
 ---
 

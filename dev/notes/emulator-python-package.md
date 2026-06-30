@@ -187,6 +187,8 @@ block's train/val dv/params/covmat keys to absolute under `root/chains`), and
 `$ROOTDIR/external_modules/data`. Canonical call:
 `python .../dev/train_single_emulator_cosmic_shear.py --root projects/lsst_y1/
 --fileroot emulators/nla_cosmic_shear/ --yaml test.yaml --diagnostic diag.pdf`.
+The example YAML templates were moved to `example_yamls/` (runtime still reads
+the YAML from `--fileroot`, so these are copy-from templates, not read in place).
 README updated to match (drivers beside emulator/, the cocoa invocation, deploy
 path). ROOTDIR itself: [[cocoa-rootdir-env]].
 
