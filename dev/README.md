@@ -17,7 +17,8 @@ bake-off).
 5. [Variants](#5-variants)
 6. [Run it](#6-run-it)
 7. [Appendix: the chi2 metric (Mahalanobis)](#7-appendix-the-chi2-metric-mahalanobis)
-8. [Appendix: every file's functions](#8-appendix-every-files-functions)
+8. [Appendix: activation functions](#8-appendix-activation-functions)
+9. [Appendix: every file's functions](#9-appendix-every-files-functions)
     1. [`data_staging.py`](#apx-data_staging)
     2. [`geometries_parameter.py`](#apx-geometries_parameter)
     3. [`geometries_output.py`](#apx-geometries_output)
@@ -464,7 +465,89 @@ units, with correlations removed).
 
 ---
 
-## 8. Appendix: every file's functions
+## 8. Appendix: activation functions
+
+The `ResBlock` nonlinearity is a **learnable, per-feature activation**: every
+feature (one entry of the vector) carries its own shape parameters, trained with
+the network. The default is the paper's $H(x)$; three generalizations are
+available, selected by name (`--activation`, or `make_activation` in
+[`activations.py`](emulator/activations.py)). Throughout, $\odot$ is the
+elementwise (Hadamard) product, $\sigma(z) = 1/(1 + e^{-z})$ is the logistic
+sigmoid, and each Greek symbol is a length-`dim` vector (one value per feature).
+
+### The paper's $H(x)$
+
+From eq. (6) of [arXiv:2505.22574](https://arxiv.org/pdf/2505.22574):
+
+$$H(x) = \Big( \gamma + (1 + e^{-\beta \odot x})^{-1} \odot (1 - \gamma) \Big) \odot x$$
+
+Because $(1 + e^{-\beta x})^{-1} = \sigma(\beta x)$, this is a per-feature
+**interpolation between the identity and a Swish gate**:
+
+$$H(x) = \gamma \odot x \;+\; (1 - \gamma) \odot \mathrm{Swish}_\beta(x), \qquad \mathrm{Swish}_\beta(x) = x\,\sigma(\beta x).$$
+
+The gate $\gamma + (1-\gamma)\,\sigma(\beta x)$ runs from $\gamma$ (as
+$x \to -\infty$) to $1$ (as $x \to +\infty$), so $H$ is **asymptotically linear
+on both tails** — slope $\gamma$ on the left, $1$ on the right. That
+non-saturation is why it beats $\tanh$ (whose slope vanishes) for these
+emulators. $\gamma$ sets the left-tail slope (the linear-vs-nonlinear mix),
+$\beta$ the kink sharpness near $x = 0$. At init $\gamma = \beta = 0$, so $H$
+starts as $0.5\,x$ (since $\sigma(0) = 0.5$) and training shapes each feature's
+curve. Two learnable vectors per feature ($\gamma$, $\beta$).
+
+### Generalizations
+
+Each is a strict superset of $H$ and recovers it at initialization. They give the
+activation more freedom where the target is hard; $H$ stays the default.
+
+**Multi-gate** (`multigate`, `GatedActivation`) — replace the single Swish gate
+with a sum of $K$ sigmoids, a learnable slope-vs-$x$ schedule in the bulk:
+
+$$\mathrm{gate}(x) = a_0 + \sum_{k=1}^{K} w_k\,\sigma\big(\beta_k\,(x - \mu_k)\big), \qquad \mathrm{out} = \mathrm{gate}(x) \odot x.$$
+
+Every term is a bounded sigmoid times $x$, so the output stays asymptotically
+linear (slope $a_0$ to the left, $a_0 + \sum_k w_k$ to the right). $H$ is the
+$K = 1$ case ($a_0 = \gamma$, $w_1 = 1 - \gamma$, $\mu_1 = 0$); the general form
+also frees the right-tail slope and the kink center $\mu$. $3K + 1$ vectors per
+feature.
+
+**Bounded power tail** (`power`, `PowerGatedActivation`) — keep $H$'s gate but
+apply it to a signed power transform $\psi_p$, linear near $0$ and $\sim |x|^p$
+in the tail, with $p$ learnable and boxed into $[p_{\min}, p_{\max}]$ (default
+$[0.5, 1.5]$, between $\sqrt{x}$ and $x^{1.5}$):
+
+$$\psi_p(x) = \operatorname{sign}(x)\,\frac{(1 + |x|)^p - 1}{p}, \qquad p = p_{\min} + (p_{\max} - p_{\min})\,\sigma(\rho),$$
+
+$$\mathrm{out} = \big(\gamma + (1 - \gamma)\,\sigma(\beta x)\big) \odot \psi_p(x).$$
+
+The $/p$ normalization gives $\psi_p$ slope $1$ at $x = 0$ for **any** $p$, so
+$p$ reshapes only the tail; the base $1 + |x| \ge 1$ keeps any real $p$ finite
+(no `NaN`), and the sigmoid box prevents a runaway exponent — safe
+superlinearity, unlike a raw $x^n$. $p = 1$ (at $\rho = 0$) recovers $H$. Three
+vectors per feature ($\gamma$, $\beta$, $\rho$).
+
+**Both** (`gated_power`, `GatedPowerActivation`) — the multi-gate bulk times the
+bounded power tail:
+
+$$\mathrm{out} = \Big(a_0 + \sum_{k=1}^{K} w_k\,\sigma\big(\beta_k(x - \mu_k)\big)\Big) \odot \psi_p(x).$$
+
+$3K + 2$ vectors per feature.
+
+### Selecting one
+
+| `--activation` | class | adds over `H` | params / feature |
+|---|---|---|---|
+| `H` (default) | `activation_fcn` | — (the paper's gate) | 2 |
+| `multigate` | `GatedActivation` | K-sigmoid bulk slope schedule | 3K + 1 |
+| `power` | `PowerGatedActivation` | bounded learnable tail exponent | 3 |
+| `gated_power` | `GatedPowerActivation` | both of the above | 3K + 2 |
+
+$K$ (the gate count for the multi-gate families) is `make_activation`'s
+`n_gates`, default 3.
+
+---
+
+## 9. Appendix: every file's functions
 
 One line per function / class / method. For full detail, read the docstring in
 the file itself; this is the index.
