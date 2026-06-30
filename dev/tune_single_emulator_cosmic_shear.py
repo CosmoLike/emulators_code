@@ -8,7 +8,7 @@
 # (xi) emulator setup (ResMLP or ResCNN, per the YAML), but runs an Optuna study
 # minimizing validation f(delta-chi2 > 0.2) rather than one run.
 #
-#     python driver/tune_single_emulator_cosmic_shear.py \
+#     python external_modules/code/emulators/emultrf/dev/tune_single_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/nla_cosmic_shear/ \
 #       --yaml tune.yaml \
@@ -50,16 +50,13 @@
 #-------------------------------------------------------------------------------
 
 import argparse
-import os
-import sys
 
 import optuna
 
-# The emulator package sits one directory up; put the repo root on sys.path so
-# `import emulator` resolves from any working dir (see the training driver).
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-  sys.path.insert(0, ROOT)
+# This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
+# so launching it by path makes its own directory sys.path[0] and
+# `import emulator` resolves with no path manipulation. Run it from $ROOTDIR;
+# emulator.cocoa reads $ROOTDIR to resolve the data paths.
 
 from emulator.cocoa import add_cocoa_path_args, resolve_cocoa_config
 from emulator.training import suggest_train_args, search_defaults

@@ -1,6 +1,6 @@
 ---
 name: analytic-scaling-preprocessing
-description: "Physics-informed RATIO preprocessing for the cosmic-shear emulator: multiply each data vector by R = xi_analytic(mid)/xi_analytic(cosmo) from a crude analytic model (E&H zero-baryon, linear, Limber, single-source-plane delta-n(z), H=H0), emulate the flatter residual, divide R back out before the chi2. The ratio cancels cosmology-common nonlinearity so a linear no-halofit model still works. Validated by spread ratio (As-only 0.79, +shape 0.515, +N amplitude 0.456; N=(Om h^2)^ns/h also lifts improved-fraction 0.89->0.98). include_amp=True is the standard. Helps the broadband bulk, NOT the omega_b h^2 floor. Full derivation in analytic_scaling.pdf. RESULT (2026-06-24, NARROW): as a TARGET rescaling it did NOT help on THIS emulator -- on the learning curve WORSE than plain at small N (2k: 0.51 vs 0.57; 3.7k: 0.33 vs 0.38), converged to plain by ~7k. Not a bug (chi2 verified exact). A PLAUSIBLE but UNCONFIRMED mechanism (one case -- do NOT over-generalize to 'any reparametrization hurts') is conditioning: the /R undo reweights the net's output gradient per cosmology, vs the plain net whose output IS the chi2 residual. Actionable (this emulator): deprioritize target rescaling; UNTESTED alternatives = analytic as input feature or pretrain init (keep the plain loss). _analytic_R / E&H machinery reusable for those."
+description: "Physics-informed RATIO preprocessing for the cosmic-shear emulator: multiply each data vector by R = xi_analytic(mid)/xi_analytic(cosmo) from a crude analytic model (E&H zero-baryon, linear, Limber, single-source-plane delta-n(z), H=H0), emulate the flatter residual, divide R back out before the chi2. The ratio cancels cosmology-common nonlinearity so a linear no-halofit model still works. Validated by spread ratio (As-only 0.79, +shape 0.515, +N amplitude 0.456; N=(Om h^2)^ns/h also lifts improved-fraction 0.89->0.98). include_amp=True is the standard. Helps the broadband bulk, NOT the omega_b h^2 floor. Full derivation in texnotes/analytic_scaling.pdf. RESULT (2026-06-24, NARROW): as a TARGET rescaling it did NOT help on THIS emulator -- on the learning curve WORSE than plain at small N (2k: 0.51 vs 0.57; 3.7k: 0.33 vs 0.38), converged to plain by ~7k. Not a bug (chi2 verified exact). A PLAUSIBLE but UNCONFIRMED mechanism (one case -- do NOT over-generalize to 'any reparametrization hurts') is conditioning: the /R undo reweights the net's output gradient per cosmology, vs the plain net whose output IS the chi2 residual. Actionable (this emulator): deprioritize target rescaling; UNTESTED alternatives = analytic as input feature or pretrain init (keep the plain loss). _analytic_R / E&H machinery reusable for those."
 metadata: 
   node_type: memory
   type: project
@@ -108,8 +108,8 @@ only -- no cosmolike. `dv_to_xi` reshapes a flat dv row into plot_xi's
 (theta, xip, xim) matrix layout. `RescaledChi2(CosmolikeChi2)` is the opt-in
 subclass: overrides encode/decode (apply R) and chi2/loss (divide R out so the
 chi2 stays on the physical dv); base class is untouched, so the two are
-A/B-swappable. Derivation written up in `analytic_scaling.pdf` / `.tex` at the
-repo root.
+A/B-swappable. Derivation written up in `analytic_scaling.pdf` / `.tex` in the
+`texnotes/` folder.
 
 **Status: WIRED, VERIFIED, RUNNING (2026-06-24).** The %%time run now passes the
 configured RescaledChi2; the only open task is reading frac>0.2. The pre-flight

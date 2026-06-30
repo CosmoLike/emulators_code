@@ -12,7 +12,7 @@
 # the curve shape: a real inductive-bias win keeps descending (lower sample
 # complexity) where others flatten, not a single-N offset.
 #
-#     python driver/bakeoff_activation_emulator_cosmic_shear.py \
+#     python external_modules/code/emulators/emultrf/dev/bakeoff_activation_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/nla_cosmic_shear/ \
 #       --yaml test.yaml \
@@ -30,7 +30,7 @@
 #  the N_train sweep). At most len(activations) GPUs used; default 4
 #  activations, 8 GPUs, 4 idle. With --n-gpus 4:
 #
-#     python driver/bakeoff_activation_emulator_cosmic_shear.py \
+#     python external_modules/code/emulators/emultrf/dev/bakeoff_activation_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/nla_cosmic_shear/ \
 #       --yaml test.yaml \
@@ -69,18 +69,15 @@
 
 import argparse
 import os
-import sys
 import time
 
 import numpy as np
 import torch
 
-# The emulator package sits one directory up from driver/; put the repo root on
-# sys.path so `import emulator` resolves from any working directory (see the
-# training driver for the why).
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-  sys.path.insert(0, ROOT)
+# This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
+# so launching it by path makes its own directory sys.path[0] and
+# `import emulator` resolves with no path manipulation. Run it from $ROOTDIR;
+# emulator.cocoa reads $ROOTDIR to resolve the data paths.
 
 from emulator.cocoa import (
   add_cocoa_path_args, resolve_cocoa_config, cocoa_output)

@@ -2,7 +2,8 @@
 
 A neural emulator that maps cosmological parameters to the masked cosmic-shear
 (`xi`) data vector, trained against the full-3x2pt chi2 from cosmolike. Ported
-from `pytorch1.ipynb` into a library (`emulator/`) plus CLI drivers (`driver/`).
+from `pytorch1.ipynb` into a library (`emulator/`) plus CLI driver scripts that
+sit beside it.
 
 One line: raw dumps → stage → whiten params (input) and data vector (output) →
 ResMLP / ResCNN → chi2 loss → train. `EmulatorExperiment` wires it together; each
@@ -62,12 +63,16 @@ emulator/                              the library (pure torch, except geometrie
   diagnostics.py                       coverage, local-linear floor, hard-direction fits
   parallel/  PCE/  IA/                 experimental variants (section 5)
 
-driver/                                CLI scripts; each reads a --yaml
-  train_single_*.{py,yaml}             one training run (+ optional diagnostics PDF)
-  tune_single_*.{py,yaml}              Optuna hyperparameter search
-  sweep_ntrain_*.py                    f(dchi2 > thr) vs N_train   (multi-GPU)
-  bakeoff_activation_*.py              one curve per activation    (multi-GPU)
+train_single_*.{py,yaml}               CLI: one training run (+ optional diagnostics PDF)
+tune_single_*.{py,yaml}                CLI: Optuna hyperparameter search
+sweep_ntrain_*.py                      CLI: f(dchi2 > thr) vs N_train   (multi-GPU)
+bakeoff_activation_*.py                CLI: one curve per activation    (multi-GPU)
 ```
+
+The driver scripts sit beside `emulator/` (no `driver/` subfolder): launching one
+puts its own folder on `sys.path`, so `import emulator` resolves with no path
+setup. In a cocoa install this folder is
+`external_modules/code/emulators/emultrf/dev/`; run the drivers from `$ROOTDIR`.
 
 The library is pure PyTorch and reviewable anywhere; only `geometries_output.py`
 imports cosmolike, so training runs on the workstation where cosmolike lives.
@@ -331,7 +336,7 @@ driver is a thin wrapper that varies one knob:
 | `plotting.py` | Training history, learning-curve overlays, coverage panels, xi curves. |
 | `diagnostics.py` | Post-training analyses: coverage (kNN distance vs error), the local-linear data floor, the hard-direction regression. |
 
-**Drivers** (`driver/`, each reads a `--yaml`)
+**Drivers** (beside `emulator/`; each reads `--root` / `--fileroot` / `--yaml`)
 
 | File | Role |
 |---|---|
@@ -355,7 +360,7 @@ driver is a thin wrapper that varies one knob:
 | the GPU-memory regime / batching | `batching.py` |
 | the optimizer/scheduler build or the training loop | `training.py` |
 | the end-to-end setup wiring | `experiment.py` |
-| a CLI driver (add/modify) | `driver/*.py` (compose `EmulatorExperiment`) |
+| a CLI driver (add/modify) | `*_emulator_cosmic_shear.py` (beside `emulator/`; compose `EmulatorExperiment`) |
 | which hyperparameters are searched | the driver YAML (`[default, min, max, kind]`) + resolvers in `training.py` |
 | multi-GPU balancing | `scheduling.py` |
 | the output file format | `results.py` |
@@ -383,21 +388,29 @@ Each subfolder mirrors the two-file shape (`emulator_designs.py` +
 cosmolike runs only on the workstation, so train there.
 
 ```bash
+# run from $ROOTDIR (cocoa exports it). --root = project folder under $ROOTDIR;
+# --fileroot = a subfolder of it holding this emulator's YAML + outputs; --yaml =
+# a bare filename under --fileroot. Data (dv/params/covmat) lives in --root/chains.
+D=external_modules/code/emulators/emultrf/dev
+
 # one run
-python driver/train_single_emulator_cosmic_shear.py \
-  --yaml driver/train_single_emulator_cosmic_shear.yaml --diagnostic out.pdf
+python $D/train_single_emulator_cosmic_shear.py \
+  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
+  --yaml test.yaml --diagnostic out.pdf
 
 # N_train learning curve across all GPUs
-python driver/sweep_ntrain_emulator_cosmic_shear.py \
-  --yaml driver/train_single_emulator_cosmic_shear.yaml --n-points 8 --out curve
+python $D/sweep_ntrain_emulator_cosmic_shear.py \
+  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
+  --yaml test.yaml --n-points 8 --out curve
 
 # activation bake-off across GPUs
-python driver/bakeoff_activation_emulator_cosmic_shear.py \
-  --yaml driver/train_single_emulator_cosmic_shear.yaml --out bakeoff
+python $D/bakeoff_activation_emulator_cosmic_shear.py \
+  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
+  --yaml test.yaml --out bakeoff
 ```
 
-The YAML has two blocks: `data` (file paths, the cut/split, the cosmolike
-dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, and the `model` /
+The YAML has two blocks: `data` (bare input filenames resolved under
+`--root/chains`, the cut/split, the cosmolike dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, and the `model` /
 `optimizer` / `lr` / `scheduler` / `trim` / `focus` sub-blocks). Pick the model
 with `train_args.model.name` (`resmlp` | `rescnn`). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
@@ -629,9 +642,10 @@ Factored intrinsic alignment: emulate cosmology-only templates, apply the IA-amp
 - `emulator_designs.py` — `NLATemplateMLP`, `TemplateMLP` (emit the templates).
 - `loss_functions.py` — `NLAAmpFactoredChi2`, `TemplateFactoredChi2`, `tatt_coeffs` (apply the amplitude polynomial in the loss).
 
-### `driver/` <a name="apx-drivers"></a>
+### drivers (beside `emulator/`) <a name="apx-drivers"></a>
 
-Each `main()` reads a `--yaml`; the sweep / bake-off add per-GPU workers.
+Each `main()` reads `--root` / `--fileroot` / `--yaml`; the sweep / bake-off add
+per-GPU workers.
 
 - `train_single_emulator_cosmic_shear.py` — `main`: one training run + the diagnostics PDF.
 - `tune_single_emulator_cosmic_shear.py` — `main`: an Optuna study over the YAML's search ranges.

@@ -9,7 +9,7 @@
 # whitened, masked xi data vector. Loss = full-3x2pt chi2 (cosmolike's masked
 # inverse covariance).
 #
-#     python driver/train_single_emulator_cosmic_shear.py \
+#     python external_modules/code/emulators/emultrf/dev/train_single_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/nla_cosmic_shear/ \
 #       --yaml test.yaml \
@@ -25,8 +25,8 @@
 #  $ROOTDIR/external_modules/data. cosmolike runs only on the workstation; train
 #  there.
 #
-#- The emulator package (one dir up from driver/) is added to sys.path, so
-#  `import emulator` works from any launch dir.
+#- This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
+#  so `import emulator` needs no sys.path edit; just run it from $ROOTDIR.
 #
 #- `--root` (required): project folder under $ROOTDIR (e.g. projects/lsst_y1);
 #  the data files resolve under --root/chains.
@@ -89,15 +89,11 @@
 
 import argparse
 import os
-import sys
 
-# The emulator package sits one dir up from driver/. Put the repo root on
-# sys.path so `import emulator` resolves from any working dir: launching
-# `python driver/foo.py` puts driver/, not the repo root, on sys.path -- without
-# this the import below would fail.
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-  sys.path.insert(0, ROOT)
+# This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
+# so launching it by path makes its own directory sys.path[0] and
+# `import emulator` resolves with no path manipulation. Run it from $ROOTDIR;
+# emulator.cocoa reads $ROOTDIR to resolve the data paths.
 
 from emulator.cocoa import (
   add_cocoa_path_args, resolve_cocoa_config, cocoa_output)

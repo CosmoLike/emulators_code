@@ -162,6 +162,34 @@ ResCNN W_fd/W_df basis-change), and per-file APPENDICES indexing every function.
 All non-hot comprehensions in the package were converted to explicit C-style loops
 ([[py-module-style-conventions]]).
 
+## Drivers moved beside emulator/ + cocoa CLI (UPDATED 2026-06-30b)
+
+The 4 drivers were MOVED out of `driver/` to the package root (beside
+`emulator/`). In a cocoa install that root is
+`external_modules/code/emulators/emultrf/dev/`; launch
+`python .../dev/<driver>.py` from `$ROOTDIR`. Because the script's own folder is
+`sys.path[0]`, `import emulator` resolves with NO bootstrap: the old
+`ROOT = dirname(dirname(abspath(__file__)))` + `sys.path.insert` hack is GONE from
+all 4 (living in `driver/` is what forced the two-level dirname, and `abspath` is
+not symlink-safe in cocoa's tree). Dropped `import sys` from all 4 and `import os`
+from tune (each used os/sys only in the bootstrap; train/sweep/bakeoff keep os for
+`os.environ.setdefault("MPLBACKEND","Agg")`). Verified: with the script dir on
+sys.path[0], `import emulator` + `import emulator.cocoa` both resolve.
+
+New module **emulator/cocoa.py** gives the cocoa CLI: `add_cocoa_path_args`
+(registers `--root` / `--fileroot` / `--yaml`), `resolve_cocoa_config` (reads
+`$ROOTDIR`; `root = $ROOTDIR/<--root>`, `fileroot = root/<--fileroot>`; mkdir
+`root/chains`; load `fileroot/<yaml>` defaulting to `test.yaml`; rewrite the data
+block's train/val dv/params/covmat keys to absolute under `root/chains`), and
+`cocoa_output(fileroot, path)` (place an output under fileroot). So the YAML
+`data` block now lists BARE filenames (resolved under `--root/chains`), while
+`cosmolike_data_dir` / `cosmolike_dataset` still resolve under
+`$ROOTDIR/external_modules/data`. Canonical call:
+`python .../dev/train_single_emulator_cosmic_shear.py --root projects/lsst_y1/
+--fileroot emulators/nla_cosmic_shear/ --yaml test.yaml --diagnostic diag.pdf`.
+README updated to match (drivers beside emulator/, the cocoa invocation, deploy
+path). ROOTDIR itself: [[cocoa-rootdir-env]].
+
 ## NEXT
 
 More drivers/variants (ResCNN, IA/TATT once the high-T TATT dataset exists,

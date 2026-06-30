@@ -9,7 +9,7 @@
 # the floor is data-limited (still falling at the largest N) or capacity /
 # architecture-limited (a flat tail).
 #
-#     python driver/sweep_ntrain_emulator_cosmic_shear.py \
+#     python external_modules/code/emulators/emultrf/dev/sweep_ntrain_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/nla_cosmic_shear/ \
 #       --yaml test.yaml \
@@ -57,18 +57,15 @@
 
 import argparse
 import os
-import sys
 import time
 
 import numpy as np
 import torch
 
-# The emulator package sits one directory up from driver/; put the repo root on
-# sys.path so `import emulator` resolves from any working directory (see the
-# training driver for the why).
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-  sys.path.insert(0, ROOT)
+# This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
+# so launching it by path makes its own directory sys.path[0] and
+# `import emulator` resolves with no path manipulation. Run it from $ROOTDIR;
+# emulator.cocoa reads $ROOTDIR to resolve the data paths.
 
 from emulator.cocoa import (
   add_cocoa_path_args, resolve_cocoa_config, cocoa_output)
