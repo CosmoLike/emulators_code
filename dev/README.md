@@ -432,16 +432,6 @@ When I asked Claude code to review the paragraph above, the AI answer was (this 
 
 <img width="1000" alt="Screenshot 2026-06-30 at 7 12 00 PM" src="https://github.com/user-attachments/assets/e9a59983-cbbc-4a21-b962-9ee4ece4df7f" />
 
-During the development I asked Claude a couple of times if I was relying too much on the AI. Here are recorded messages
-
-Answer 1:
-
-<img width="1000" alt="Screenshot 2026-06-30 at 7 10 19 PM" src="https://github.com/user-attachments/assets/78a98862-b86c-4110-b566-b738ba6735b9" />
-
-Answer 2:
-
-<img width="1000" alt="Screenshot 2026-06-30 at 7 09 55 PM" src="https://github.com/user-attachments/assets/6846eb82-a7bc-4c07-ae09-4017bafdbfff" />
-
 ---
 
 ## 8. Appendix: the chi2 metric (Mahalanobis)
