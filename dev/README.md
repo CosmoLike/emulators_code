@@ -1,3 +1,5 @@
+**Warning** This pipeline is still in alpha stage `v0.05` and not ready for production. 
+
 # Cosmic-shear data-vector emulator
 
 A neural emulator that maps cosmological parameters to the masked cosmic-shear
@@ -7,6 +9,24 @@ One line: raw dumps → stage → whiten params (input) and data vector (output)
 ResMLP / ResCNN → chi2 loss → train. `EmulatorExperiment` wires it together; each
 driver varies one thing (one run, a tune, an `N_train` sweep, an activation
 bake-off).
+
+**AI Usage**: This library (under the `dev` folder) was developed with Claude Code assistance. However, Prof. Miranda heavily influenced 
+the code at every level, from macro-designed implementation and changes to minute Python choices.
+The initial version of this library was developed in a [Jupyter Notebook](https://github.com/vivianmiranda/learningpytorch/blob/main/pytorch1.ipynb) in another repository in which the AI didn't have writing privileges. Prof. Miranda spent hundreds of hours (it will reach 1000 hours for sure by the time this pipeline reaches v1.0) working on this pipeline and studying the Book Deep Learning with PyTorch to make sure she was not `vibe coding` (which Prof. Miranda strongly opposes).  Claude AI was a fast pair of hands and a super-smart compiler. There were a few exceptions where AI took the driving seat, mostly related to some obscure PyTorch functions and multi-gpu scheduling. Even in these cases, Prof. Miranda studied and edited every corner of the code, and also tested it in numerous ways (and it is continuing to test it). Prof. Miranda is ready to go on the blackboard and discuss every choice, every function, every quirk of the code at any time. 
+
+When I asked Claude code to review the paragraph above, the AI answer was (this repository has a copy of the Claude memory files)
+
+<img width="1001" alt="Screenshot 2026-06-30 at 7 12 00 PM" src="https://github.com/user-attachments/assets/e9a59983-cbbc-4a21-b962-9ee4ece4df7f" />
+
+During the development I asked Claude a couple of times if I was relying too much on the AI. Here are recorded messages
+
+Answer 1:
+
+<img width="800" alt="Screenshot 2026-06-30 at 7 10 19 PM" src="https://github.com/user-attachments/assets/78a98862-b86c-4110-b566-b738ba6735b9" />
+
+Answer 2:
+
+<img width="800" alt="Screenshot 2026-06-30 at 7 09 55 PM" src="https://github.com/user-attachments/assets/6846eb82-a7bc-4c07-ae09-4017bafdbfff" />
 
 ## Contents
 
