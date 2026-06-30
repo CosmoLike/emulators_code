@@ -1,0 +1,68 @@
+# Config for train_single_emulator_cosmic_shear.py
+#
+# The data files below are bare filenames; the driver resolves them under
+# $ROOTDIR/<--root>/chains (where dataset_generator_lensing.py writes the
+# dvs / params / covmat), so no folder prefix and no dependence on the
+# launch directory. The cosmolike_data_dir / cosmolike_dataset keys are
+# separate: they live under $ROOTDIR/external_modules/data, not under --root.
+
+data:
+  train_dv:     w0wa_takahashi_dvs_train_cs_16.npy
+  train_params: w0wa_takahashi_params_train_cs_16.1.txt
+  train_covmat: w0wa_takahashi_params_train_cs_16.covmat
+  val_dv:       w0wa_takahashi_dvs_train_cs_8.npy
+  val_params:   w0wa_takahashi_params_train_cs_8.1.txt
+
+  cosmolike_data_dir: lsst_y1
+  cosmolike_dataset:  lsst_y1_M1_GGL0.05.dataset
+
+  omegabh2_cut:  0.035   # drop omega_b h^2 >= this (the hard corner)
+  train_divisor: 10      # N_train = N // train_divisor
+  val_divisor:   50      # N_val   = N // val_divisor
+  split_seed:    0
+  ram_frac:      0.7     # RAM fraction stage_source may fill
+
+train_args:
+  nepochs:   1600
+  bs:        256
+  loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
+  silent:    false       # false -> per-epoch progress lines
+
+  model:                 # name picks the class; other keys are its kwargs
+    name:        resmlp    # resmlp | rescnn
+    int_dim_res: 128
+    n_blocks:    4
+    # ResCNN-only knobs (ignored by ResMLP) -- uncomment for rescnn:
+    # kernel_size:  11       # conv kernel width (odd)
+    # channels:     16       # conv filters in the 1D-CNN appendix
+    # n_blocks_cnn: 1        # stacked CNN correction blocks
+    # gate_init:    0.1      # initial correction-gate scale (small, not 0)
+    # compile_mode: default  # CUDA: ResCNN may need this, not reduce-overhead
+
+  optimizer:             # cls is fixed to AdamW in the script
+    weight_decay: 0.0
+
+  lr:                    # learning rate = lr_base * sqrt(bs / bs_base)
+    lr_base:       0.0025
+    bs_base:       64.0
+    warmup_epochs: 10
+
+  scheduler:             # cls is fixed to ReduceLROnPlateau
+    mode:     min
+    patience: 25
+    factor:   0.8
+
+  trim:                  # hold `start`, then ease to `end`
+    start:         0.1
+    end:           0.025
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         cosine
+
+  focus:                 # focal hardness weighting (gamma schedule)
+    start:         0.0
+    end:           2.0
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         linear
+    kappa:         0.15

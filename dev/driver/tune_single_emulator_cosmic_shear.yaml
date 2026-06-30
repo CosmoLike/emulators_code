@@ -1,0 +1,76 @@
+# Config for tune_single_emulator_cosmic_shear.py
+#
+# Same schema as the training YAML, except a train_args leaf may be
+# a SEARCH RANGE instead of a fixed scalar:
+#
+#     knob: value                       # fixed
+#     knob: [default, min, max, kind]   # searched; kind = int|float|log
+#
+# The first value is the DEFAULT (the training driver uses it; this
+# search warm-starts trial 0 from it). Lower nepochs here so each
+# trial is fast.
+#
+# The data files below are bare filenames; the driver resolves them under
+# $ROOTDIR/<--root>/chains. cosmolike_data_dir / cosmolike_dataset are
+# separate, under $ROOTDIR/external_modules/data.
+
+data:
+  train_dv:     w0wa_takahashi_dvs_train_cs_16.npy
+  train_params: w0wa_takahashi_params_train_cs_16.1.txt
+  train_covmat: w0wa_takahashi_params_train_cs_16.covmat
+  val_dv:       w0wa_takahashi_dvs_train_cs_8.npy
+  val_params:   w0wa_takahashi_params_train_cs_8.1.txt
+
+  cosmolike_data_dir: lsst_y1
+  cosmolike_dataset:  lsst_y1_M1_GGL0.05.dataset
+
+  omegabh2_cut:  0.035
+  train_divisor: 10
+  val_divisor:   50
+  split_seed:    0
+  ram_frac:      0.7
+
+train_args:
+  nepochs:   900         # lower than training -> faster trials
+  bs:        256
+  loss_mode: sqrt
+
+  model:                 # name picks the class; other keys are its kwargs
+    name:        resmlp                # resmlp | rescnn (fixed across study)
+    int_dim_res: [128, 64, 256, int]   # searched
+    n_blocks:    [4, 2, 6, int]        # searched
+    # ResCNN-only knobs (ignored by ResMLP) -- uncomment for rescnn; each
+    # may be a fixed value or a [default, min, max, kind] search range:
+    # kernel_size:  11
+    # channels:     16
+    # n_blocks_cnn: 1
+    # gate_init:    0.1
+    # compile_mode: default            # CUDA: ResCNN may need this
+
+  optimizer:
+    weight_decay: 0.0
+
+  lr:                    # learning rate = lr_base * sqrt(bs / bs_base)
+    lr_base:       [0.0025, 1.0e-4, 1.0e-2, log]   # searched, log
+    bs_base:       64.0
+    warmup_epochs: 10
+
+  scheduler:
+    mode:     min
+    patience: [25, 10, 40, int]        # searched
+    factor:   [0.8, 0.5, 0.95, float]  # searched
+
+  trim:
+    start:         [0.1, 0.0, 0.2, float]   # searched
+    end:           0.025
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         cosine
+
+  focus:
+    start:         0.0
+    end:           [2.0, 0.0, 4.0, float]   # searched
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         linear
+    kappa:         [0.15, 0.05, 0.5, log]   # searched

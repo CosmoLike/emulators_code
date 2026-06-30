@@ -1,0 +1,371 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+
+\newcommand{\Om}{\Omega_m}
+\newcommand{\Ob}{\Omega_b}
+\newcommand{\As}{A_s}
+\newcommand{\ns}{n_s}
+\newcommand{\Dhub}{D_H}
+\newcommand{\xipm}{\xi_\pm}
+
+\title{An Analytic Scaling for Cosmic-Shear\\
+Data-Vector Emulation}
+\author{V.\ Miranda}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Idea}
+
+A neural emulator learns the map from cosmological parameters
+$\boldsymbol{\theta}_{\rm c}$ to the cosmic-shear data vector
+$\mathbf d(\boldsymbol{\theta}_{\rm c})$. The dynamic range of
+$\mathbf d$ across the prior is large, which makes the map hard
+to fit. We remove most of that range \emph{analytically}: divide
+out a fast approximate model and emulate the (flatter) residual.
+
+Concretely, pick a reference (``mid'') cosmology and preprocess
+each data vector element-wise by
+\begin{equation}
+  \tilde{\mathbf d}(\boldsymbol{\theta}_{\rm c})
+  = \mathbf d(\boldsymbol{\theta}_{\rm c}) \odot
+    \mathbf R(\boldsymbol{\theta}_{\rm c}),
+  \qquad
+  R \;=\; \frac{\xi^{\rm an}(\boldsymbol{\theta}_{\rm mid})}
+               {\xi^{\rm an}(\boldsymbol{\theta}_{\rm c})},
+  \label{eq:idea}
+\end{equation}
+where $\xi^{\rm an}$ is the analytic model below. The network
+emulates $\tilde{\mathbf d}$ (which clusters near the mid
+cosmology); the physical vector is recovered as
+$\mathbf d=\tilde{\mathbf d}\oslash\mathbf R$ before the
+$\chi^2$, so the data covariance and the reported metric are
+unchanged. Because $R$ is a \emph{ratio}, any cosmology-common
+factor (e.g.\ the bulk of the nonlinear boost) cancels: the
+model only has to capture the cosmology \emph{dependence}.
+
+\section{Approximations}
+
+\begin{enumerate}[nosep]
+  \item Limber projection.
+  \item Each tomographic source bin is a single source plane at
+        the peak of its $n(z)$ (a $\delta$-function $n(z)$).
+  \item Pure dark energy expansion, $H(z)=H_0$, giving
+        closed-form distances.
+  \item Linear matter power spectrum (no halofit).
+  \item Eisenstein--Hu zero-baryon transfer function.
+  \item Hankel transform to real space approximated by a
+        $\delta$-function at $\ell\theta=1$; the Limber integral
+        evaluated at the lensing-kernel peak $u_\star$.
+\end{enumerate}
+
+None of these need to be accurate: $\xi^{\rm an}$ is only a
+reference whose cosmology-dependence we divide out.
+
+\section{Projection}
+
+For a tomographic source pair $(i,j)$ the Limber shear spectrum is
+\begin{equation}
+  C_\ell^{ij}
+  = \int_0^{\chi_{\min}}\! \frac{q_i(\chi)\,q_j(\chi)}{\chi^2}\,
+    P\!\left(k=\tfrac{\ell+1/2}{\chi},\,z(\chi)\right)\,d\chi,
+  \qquad \chi_{\min}=\min(\chi_i,\chi_j),
+  \label{eq:limber}
+\end{equation}
+with the single-plane lensing efficiency
+\begin{equation}
+  q_i(\chi)=\frac{3}{2}\,\Om\left(\frac{H_0}{c}\right)^2
+            \frac{\chi}{a(\chi)}\,\frac{\chi_i-\chi}{\chi_i},
+            \qquad \chi<\chi_i .
+  \label{eq:kernel}
+\end{equation}
+Under $H(z)=H_0$ the distance is closed form,
+\begin{equation}
+  \chi(z)=\frac{c}{H_0}\,z \equiv \Dhub\,z,
+  \qquad a(z)=\frac{1}{1+z},
+  \qquad \chi_i=\Dhub\,z_{s,i}.
+  \label{eq:dist}
+\end{equation}
+
+\section{Linear power spectrum}
+
+The matter spectrum follows from the primordial curvature spectrum
+and the linear transfer. Write the dimensionless primordial spectrum
+as
+\begin{equation}
+  \Delta_\mathcal{R}^2(k)=\As\,(k/k_p)^{\ns-1},
+\end{equation}
+with $k_p$ the pivot. In the matter era the sub-horizon density
+contrast is, through the Poisson equation, proportional to the
+primordial mode $\mathcal{R}(k)$,
+\begin{equation}
+  \delta_m(k,a)=\frac{2}{5}\,\frac{c^2 k^2}{\Om H_0^2}\,
+  T(k)\,D(a)\,\mathcal{R}(k),
+\end{equation}
+where $T(k)$ is the Eisenstein--Hu zero-baryon transfer function
+(Appendix~\ref{app:eh}) and $D(a)$ the growth factor. Squaring and
+converting to the dimensionful spectrum, $P=(2\pi^2/k^3)\Delta^2$,
+\begin{equation}
+  P_{\rm lin}(k,a)=\frac{2\pi^2}{k^3}
+  \left[\frac{2}{5}\,\frac{c^2 k^2}{\Om H_0^2}\right]^{\!2}
+  T^2(k)\,D^2(a)\,\Delta_\mathcal{R}^2(k).
+\end{equation}
+With growth frozen ($H=H_0$ is de~Sitter, so $D=\text{const}$,
+absorbed into the normalization) and at $z=0$, collecting the powers
+of $k$ ($k^{-3}\cdot k^4\cdot k^{\ns-1}=k^{\ns}$) gives
+\begin{equation}
+  P_{\rm lin}(k)=\frac{8\pi^2}{25}\,\As\,
+  \left(\frac{c^2}{\Om H_0^2}\right)^{\!2}
+  k_p^{1-\ns}\,k^{\ns}\,T^2(k).
+  \label{eq:plin}
+\end{equation}
+
+\section{Amplitude cancellation}
+
+The lensing kernel and the power spectrum carry opposite powers of
+the amplitude parameters. From Eqs.~\eqref{eq:kernel}
+and~\eqref{eq:plin},
+\begin{equation}
+  q_i q_j \propto \Om^2\left(\frac{H_0}{c}\right)^{\!4},
+  \qquad
+  P_{\rm lin}\propto \As\,c^4\,\Om^{-2} H_0^{-4}\,k^{\ns}T^2(k),
+\end{equation}
+so in the Limber integrand the amplitude factors cancel term by
+term,
+\begin{equation}
+  q_i q_j\,P_{\rm lin}\propto
+  \Om^2\left(\frac{H_0}{c}\right)^{\!4}\!\cdot
+  \As\,c^4\,\Om^{-2} H_0^{-4}\,k^{\ns}T^2(k)
+  = \As\,k^{\ns}T^2(k).
+\end{equation}
+Hence $C_\ell$ is proportional to $\As$ alone: $\Om$ and $H_0$
+cancel out of the \emph{amplitude},
+\begin{equation}
+  \boxed{\,C_\ell = \As\;G(\ell;\Om,H_0,\ns,z_s)\,}.
+  \label{eq:Ascancel}
+\end{equation}
+In the $(\As,\Om,h)$ parametrization, $\As$ therefore carries the
+entire lensing amplitude; $\Om$ and $H_0$ enter only through the
+\emph{shape} $G$ (the transfer function and the geometry). This is
+why dividing by $\As^{\rm mid}/\As$ is exact and removes the single
+largest direction of variance.
+
+\section{Real space and the effective wavenumber}
+
+The correlation functions are Hankel transforms of $C_\ell$,
+\begin{equation}
+  \xipm(\theta)=\frac{1}{2\pi}\int_0^\infty \ell\,C_\ell\,
+  J_{0,4}(\ell\theta)\,d\ell .
+  \label{eq:hankel}
+\end{equation}
+Approximate the oscillating Bessel kernel by a $\delta$-function at
+its argument, $J_{0,4}(\ell\theta)\approx a\,\delta(\ell\theta-1)$
+for a constant $a$. Since
+$\delta(\ell\theta-1)=\delta(\ell-1/\theta)/\theta$, the integral
+collapses onto a single multipole $\ell_\star=1/\theta$,
+\begin{equation}
+  \xipm(\theta)\approx \frac{a}{2\pi}\int_0^\infty \ell\,C_\ell\,
+  \frac{\delta(\ell-1/\theta)}{\theta}\,d\ell
+  = \frac{a}{2\pi}\,\ell_\star^2\,C_{\ell_\star},
+  \qquad \ell_\star=\frac{1}{\theta}.
+  \label{eq:hankel2}
+\end{equation}
+The Limber integral~\eqref{eq:limber} is collapsed the same way, at
+the lensing-kernel peak $\chi_\star=u_\star\chi_s$, fixing one
+wavenumber
+\begin{equation}
+  k_\star=\frac{\ell_\star}{\chi_\star}
+        =\frac{1}{\theta\,u_\star\chi_s}
+        =\frac{H_0}{c\,u_\star\,\theta\,z_s},
+\end{equation}
+where the last step used $\chi_s=\Dhub z_s=(c/H_0)z_s$
+from Eq.~\eqref{eq:dist}. The transfer function only ever sees the
+dimensionless combination $q\equiv k_\star\Theta^2/(\Om h^2)$; with
+$H_0=100\,h~{\rm km\,s^{-1}Mpc^{-1}}$ the factor
+$H_0/(\Om h^2)=100/(\Om h)=100/\Gamma$, so
+\begin{equation}
+  \boxed{\;
+  q \equiv \frac{k_\star\,\Theta^2}{\Om h^2}
+    = \frac{K}{\theta\,z_s\,\Gamma},
+  \qquad
+  K=\frac{100\,\Theta^2}{c\,u_\star},
+  \qquad
+  \Gamma\equiv\Om h,
+  \qquad
+  \Theta\equiv\frac{T_{\rm CMB}}{2.7\,{\rm K}},
+  \;}
+  \label{eq:q}
+\end{equation}
+with $\theta$ in radians. The shape parameter $\Gamma=\Om h$ and
+the source redshift enter \emph{only} through the single
+combination $q\propto 1/(\theta\,\Gamma\,z_s)$: a rescaling of the
+angle is equivalent to a change in $\Gamma z_s$.
+
+\section{The scaling}
+
+Put the pieces together. With the amplitude stripped
+(Eq.~\ref{eq:Ascancel}), the Limber spectrum~\eqref{eq:limber} is
+\begin{equation}
+  C_\ell = \As\,c_0\!\int_0^{\chi_s}\!\! \frac{d\chi}{\chi^2}\,
+  \left[\frac{\chi}{a}\,\frac{\chi_s-\chi}{\chi_s}\right]^2
+  k^{\ns}T^2(k), \qquad k=\ell/\chi,
+\end{equation}
+with $c_0$ a constant. Substitute $u=\chi/\chi_s$, so $\chi=u\chi_s$,
+$z=u z_s$, $a=1/(1+u z_s)$, and $d\chi=\Dhub z_s\,du$. The geometric
+bracket simplifies,
+\begin{equation}
+  \frac{1}{\chi^2}
+  \left[\frac{\chi}{a}\,\frac{\chi_s-\chi}{\chi_s}\right]^2
+  =\frac{\big[u\chi_s(1+u z_s)(1-u)\big]^2}{(u\chi_s)^2}
+  =(1+u z_s)^2(1-u)^2,
+\end{equation}
+so $C_\ell=\As\,c_0\,\Dhub z_s\!\int_0^1\!du\,(1+u z_s)^2(1-u)^2\,
+k^{\ns}T^2(k)$. Collapse this integral at the kernel peak $u_\star$
+and use $\xipm\propto\ell_\star^2 C_{\ell_\star}$ with
+$\ell_\star=1/\theta$ (Eq.~\ref{eq:hankel2}):
+\begin{equation}
+  \xipm(\theta)\propto \As\,
+  \Dhub z_s\,(1+u_\star z_s)^2(1-u_\star)^2\,
+  \ell_\star^2\,k_\star^{\ns}\,T^2(k_\star).
+  \label{eq:xicollapse}
+\end{equation}
+At fixed $\theta$ the factor $\ell_\star^2=\theta^{-2}$ and the
+$u_\star$ constants are common to every cosmology and cancel in the
+ratio $R$ below, so we keep only the cosmology-dependent factors.
+Splitting $k_\star^{\ns}=q^{\ns}k_\Gamma^{\ns}$ with
+$k_\Gamma=\Om h^2/\Theta^2$ (so $k_\star=q\,k_\Gamma$) and using
+$\Dhub=c/H_0\propto1/h$,
+\begin{equation}
+  \xipm(\theta)=\As\;\mathcal{N}(\Om,h,z_s,\ns)\;
+                q^{\ns}\,T^2(q),
+  \qquad
+  \mathcal{N}\propto
+  \frac{z_s\,(1+u_\star z_s)^2\,(\Om h^2)^{\ns}}{h},
+  \label{eq:xifull}
+\end{equation}
+where $\mathcal{N}$ is a slowly varying geometric amplitude and
+$q^{\ns}T^2(q)$ is the dimensionless shape.
+
+\section{The preprocessing ratio}
+
+In the ratio, the survey-fixed parts of $\mathcal{N}$ ($z_s$ and the
+geometric factor $(1+u_\star z_s)^2$) are identical for the reference
+and the target and cancel exactly. What survives is a per-cosmology
+\emph{scalar} amplitude $(\Om h^2)^{\ns}/h$: the $\Om$--$H_0$
+amplitude that cancelled out of the leading $C_\ell$
+(Eq.~\ref{eq:Ascancel}) re-enters here through the tilt
+$k_\Gamma^{\ns}=(\Om h^2)^{\ns}$ and the $1/h$ distance measure. It
+is a \emph{second} amplitude direction, independent of $A_s$, and is
+kept. Equation~\eqref{eq:idea} becomes the per-element factor
+\begin{equation}
+  \boxed{\;
+  R(\theta)=R_{\rm amp}\;
+  \frac{q_{\rm mid}^{\,\ns^{\rm mid}}\,T^2(q_{\rm mid})}
+       {q^{\,\ns}\,T^2(q)},
+  \qquad
+  q=\frac{K}{\theta\,z_{\rm eff}\,\Gamma},
+  \;}
+  \label{eq:R}
+\end{equation}
+with the $\theta$-independent amplitude factor
+\begin{equation}
+  R_{\rm amp}=\frac{\As^{\rm mid}}{\As}\;
+  \frac{(\Om^{\rm mid}h_{\rm mid}^2)^{\ns^{\rm mid}}/h_{\rm mid}}
+       {(\Om h^2)^{\ns}/h},
+  \label{eq:Ramp}
+\end{equation}
+and $q_{\rm mid}=K/(\theta\,z_{\rm eff}\,\Gamma_{\rm mid})$. Each
+cosmology uses its own $(\As,\ns,\Gamma,\Om,h)$ and the reference its
+own; $R=1$ at the reference. The $\theta$-dependence enters only
+through the non-power-law transfer ratio $T^2(q_{\rm mid})/T^2(q)$
+(the genuine shape correction), since
+$q_{\rm mid}/q=\Gamma/\Gamma_{\rm mid}$ is itself
+$\theta$-independent.
+
+\paragraph{Tomographic cross-pairs.}
+The cross spectrum~\eqref{eq:limber} is cut off at the nearer
+source, so its effective lensing scale is that of the lower-redshift
+bin. The single-scale collapse therefore uses
+\begin{equation}
+  z_{\rm eff}=\min(z_{s,i},\,z_{s,j}),
+  \label{eq:zeff}
+\end{equation}
+not the geometric mean; for auto-pairs ($i=j$) they coincide. Since
+$z_{\rm eff}$ cancels at leading order in $R$, this choice only
+shifts the (mild) transfer correction, mattering at the few-percent
+level for asymmetric pairs.
+
+\section{Empirical validation}
+
+On a held-out validation set, measuring per element the spread ratio
+across cosmologies $\sigma[\tilde d_e]/\sigma[d_e]$ (its square is
+the fraction of variance \emph{remaining}) and the fraction of
+elements whose spread the rescaling reduces:
+
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+ & median ratio & mean ratio & frac.\ improved \\
+\hline
+$A_s$ only        & 0.79 & 0.76 & 1.00 \\
+$+$ shape         & 0.52 & 0.60 & 0.89 \\
+$+\,\mathcal{N}$  & 0.46 & 0.50 & 0.98 \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent The exact $A_s$ rescaling alone removes ${\sim}37\%$ of the
+variance; the shape term roughly doubles that (${\sim}74\%$); the
+$\mathcal{N}$ amplitude takes it to ${\sim}79\%$. Crucially
+$\mathcal{N}$ also raises the improved fraction from $0.89$ to
+$0.98$. The shape term alone leaves the $(\Om h^2)^{\ns}/h$ amplitude
+in the residual, which dominates at large $\theta$, where $T\to1$
+and the data variation is nearly pure amplitude---exactly the
+elements the shape term made worse. Restoring $\mathcal{N}$ removes
+that offset, and it is most reliable there (large scales, no
+transfer curvature). The reduction is largest at small $\theta$ (the
+well-constrained, small-error-bar scales) and falls to ${\sim}1$
+only at the largest $\theta$, which carry the biggest covariance and
+are down-weighted in the $\chi^2$.
+
+\section{Validity and limitations}
+
+\begin{itemize}[nosep]
+  \item \textbf{Baryons.} The zero-baryon $T(k)$ has \emph{no}
+        $\Ob$ dependence, so $R$ cannot remove the
+        $\Ob h^2$ (physical baryon density) direction. That is
+        precisely the direction that drives the hard,
+        high-$\Ob h^2$ cosmologies, so this scaling flattens the
+        broadband bulk but leaves the baryon tail to the network.
+        Capturing it would require the wiggle (with-baryon)
+        Eisenstein--Hu transfer.
+  \item \textbf{Nonlinearity.} The model is linear, but $R$ is a
+        ratio: the cosmology-common nonlinear boost largely
+        cancels, so the rescaling remains accurate at small scales
+        (where it empirically performs best) as long as that boost
+        varies weakly across the prior.
+  \item \textbf{Large scales.} At large $\theta$ the data variation
+        is nearly pure amplitude ($T\to1$); the $\mathcal{N}$ scalar
+        removes it, so these elements flatten once it is included
+        (the improved fraction rises to $0.98$). The small residual
+        sits in the highest-covariance bins and is down-weighted in
+        the $\chi^2$.
+\end{itemize}
+
+\appendix
+\section{Eisenstein--Hu zero-baryon transfer function}
+\label{app:eh}
+
+With $\Theta=T_{\rm CMB}/2.7\,{\rm K}$ and $k$ in
+${\rm Mpc}^{-1}$,
+\begin{align}
+  q   &= \frac{k\,\Theta^2}{\Om h^2}, \\
+  L   &= \ln\!\left(2e + 1.8\,q\right), \\
+  C   &= 14.2 + \frac{731}{1+62.5\,q}, \\
+  T(k)&= \frac{L}{L + C\,q^2}.
+\end{align}
+
+\end{document}
