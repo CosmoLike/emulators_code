@@ -60,7 +60,7 @@ emulator/                              the library (pure torch, except geometrie
   training.py                          build model/opt/sched, training loop, run_emulator
   experiment.py                        EmulatorExperiment: the whole setup as one object
   scheduling.py                        lpt_assign: balance a sweep across GPUs
-  results.py                           save_learning_curves (plain-text tables)
+  results.py                           save_learning_curves; save_emulator (.emul + .h5)
   plotting.py                          history / learning-curve / coverage / xi plots
   diagnostics.py                       coverage, local-linear floor, hard-direction fits
   parallel/  PCE/  IA/                 experimental variants (section 5)
@@ -335,7 +335,7 @@ driver is a thin wrapper that varies one knob:
 |---|---|
 | `experiment.py` | `EmulatorExperiment`: config → device → data → geometry → chi2 → spec → train as one reusable object (`from_yaml` / `from_config`). The drivers compose it. |
 | `scheduling.py` | `lpt_assign`: split a sweep's jobs across GPUs by total cost (Longest-Processing-Time). |
-| `results.py` | `save_learning_curves`: `np.loadtxt`-friendly plain-text tables. |
+| `results.py` | `save_learning_curves`: `np.loadtxt`-friendly plain-text tables. `save_emulator`: a trained run as `.emul` (weights, cpu state_dict) + `.h5` (whitening geometries, histories, config). |
 | `plotting.py` | Training history, learning-curve overlays, coverage panels, xi curves. |
 | `diagnostics.py` | Post-training analyses: coverage (kNN distance vs error), the local-linear data floor, the hard-direction regression. |
 
@@ -701,6 +701,7 @@ The run layer that ties everything together.
 ### `emulator/results.py` <a name="apx-results"></a>
 
 - `save_learning_curves(path, sizes, curves, meta)` — write a `np.loadtxt`-friendly plain-text table.
+- `save_emulator(path_root, model, param_geometry, geometry, config, histories, train_args, attrs)` — persist a trained run: `.emul` (cpu state_dict, compile prefix stripped) + `.h5` (geometry `state()` groups, per-epoch histories, config YAML, run-identity attrs).
 
 ### `emulator/plotting.py` <a name="apx-plotting"></a>
 

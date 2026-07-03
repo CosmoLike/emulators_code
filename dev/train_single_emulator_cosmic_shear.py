@@ -64,6 +64,15 @@
 #  along a PC names the power-law combination the emulator finds hard. Omit
 #  for no figure.
 #
+#- `--save` (default `emulator`): name root for the trained-emulator files,
+#  written under --root/chains with the run tag appended (like --diagnostic).
+#  <save>_<tag>.emul = the best-epoch weights (a torch state_dict, cpu
+#  tensors, compile-wrapper prefix stripped). <save>_<tag>.h5 = the run
+#  record: the input/output whitening states (keys match the geometries'
+#  state()/from_state, so inference rebuilds them with no covmat and no
+#  cosmolike), the per-epoch histories, the full config as YAML, and the
+#  run identity (activation, rescale, N_train, best epoch, files, device).
+#
 #- `--rescale` (optional, default `none`): divides out a fast analytic R so the
 #  net emulates a flatter target (chi2 stays on the original dv). `rescaled` =
 #  RescaledChi2 (v1: R divides the net output, so the chi2 gradient carries a
@@ -96,6 +105,10 @@
 #
 #      stdout            per-epoch progress (unless train_args.silent: true) plus
 #                        a final "best epoch N: frac>0.2 ... median ..." line.
+#      <--save>_<model>_t<T>_ntrain<N>.emul   the trained weights (torch
+#                        state_dict, cpu), under --root/chains.
+#      <--save>_<model>_t<T>_ntrain<N>.h5     the run record (whitening
+#                        geometries, histories, config), under --root/chains.
 #      <--diagnostic>_<model>_t<T>_ntrain<N>.pdf   the multipage diagnostics
 #                        PDF (under --root/chains), if --diagnostic is set.
 #-------------------------------------------------------------------------------
@@ -112,6 +125,33 @@ import re
 from emulator.cocoa import (
   add_cocoa_path_args, resolve_cocoa_config, cocoa_output)
 from emulator.experiment import EmulatorExperiment
+from emulator.results import save_emulator
+
+
+def run_tag(cfg, exp):
+  """
+  The run's identity tag for output filenames.
+
+  <model>_t<T>_ntrain<N>: the model name (YAML train_args.model.name),
+  the training temperature (the _cs_<T> tag in the train-dv file name,
+  skipped when absent), and the N_train actually staged. Appended to
+  the --diagnostic and --save name roots so runs do not overwrite each
+  other and a file says what produced it.
+
+  Arguments:
+    cfg = the resolved config mapping (data + train_args blocks).
+    exp = the staged EmulatorExperiment (reads exp.train_set).
+
+  Returns:
+    the tag string, e.g. "resmlp_t256_ntrain250000".
+  """
+  tags = [str(cfg["train_args"]["model"].get("name", "resmlp")).lower()]
+  tmatch = re.search(r"_cs_(\d+)",
+                     os.path.basename(cfg["data"]["train_dv"]))
+  if tmatch is not None:
+    tags.append(f"t{tmatch.group(1)}")
+  tags.append(f"ntrain{exp.train_set['idx'].shape[0]}")
+  return "_".join(tags)
 
 
 def main():
@@ -129,6 +169,16 @@ def main():
                            "t256_ntrain250000.pdf)",
                       type=str,
                       default=None)
+  parser.add_argument("--save",
+                      dest="save",
+                      help="name root for the trained-emulator "
+                           "files, written under --root/chains "
+                           "with the run tag appended: "
+                           "<save>_<model>_t<T>_ntrain<N>.emul "
+                           "(the weights) + .h5 (geometries, "
+                           "histories, config)",
+                      type=str,
+                      default="emulator")
   parser.add_argument("--rescale",
                       dest="rescale",
                       help="analytic-R rescaling mode: 'none' "
@@ -188,23 +238,45 @@ def main():
       f"frac>0.2 {fracs[best][0].item():.4f}  "
       f"median {medians[best]:.4f}")
 
+  # Persist the trained emulator first, before any diagnostics can fail:
+  # <save>_<tag>.emul = the best-epoch weights (torch state_dict, cpu);
+  # <save>_<tag>.h5   = both whitening geometries (from_state-ready),
+  # the per-epoch histories, the full config, and the run identity.
+  # Run products go to the project chains/ folder (with the dvs).
+  save_root = cocoa_output(chains, f"{args.save}_{run_tag(cfg, exp)}")
+  emul_path, h5_path = save_emulator(
+    path_root=save_root,
+    model=model,
+    param_geometry=exp.pgeom,
+    geometry=exp.geom,
+    config=cfg,
+    histories={"train_losses": train_losses,
+               "val_medians":  medians,
+               "val_means":    means,
+               "val_fracs":    fracs,
+               "thresholds":   exp.thresholds},
+    train_args=exp.train_args,
+    attrs={"model":       str(cfg["train_args"]["model"]
+                              .get("name", "resmlp")).lower(),
+           "activation":  exp.activation,
+           "rescale":     exp.rescale,
+           "n_train":     int(exp.train_set["idx"].shape[0]),
+           "n_val":       int(exp.val_set["idx"].shape[0]),
+           "best_epoch":  best + 1,
+           "best_frac02": fracs[best][0].item(),
+           "best_median": float(medians[best]),
+           "device":      str(exp.device),
+           "train_dv":    os.path.basename(cfg["data"]["train_dv"]),
+           "val_dv":      os.path.basename(cfg["data"]["val_dv"])})
+  log(f"saved emulator -> {emul_path}")
+  log(f"saved run record -> {h5_path}")
+
   if args.diagnostic is not None:
-    # --diagnostic is a name root: append the run's identity so runs do
+    # --diagnostic is a name root: the run tag is appended so runs do
     # not overwrite each other and the file says what produced it,
     #   diagnostic.pdf -> diagnostic_resmlp_t256_ntrain250000.pdf
-    # tags = model name (YAML train_args.model.name), training
-    # temperature (the _cs_<T> tag in the train-dv file name, skipped
-    # when absent), and the N_train actually staged.
     stem, ext = os.path.splitext(args.diagnostic)
-    tags = [str(cfg["train_args"]["model"].get("name", "resmlp")).lower()]
-    tmatch = re.search(r"_cs_(\d+)",
-                       os.path.basename(cfg["data"]["train_dv"]))
-    if tmatch is not None:
-      tags.append(f"t{tmatch.group(1)}")
-    tags.append(f"ntrain{exp.train_set['idx'].shape[0]}")
-    diag_name = f"{stem}_{'_'.join(tags)}{ext or '.pdf'}"
-    # a run product goes to the project chains/ folder (with the dvs),
-    # not the fileroot (which holds the YAML configs).
+    diag_name = f"{stem}_{run_tag(cfg, exp)}{ext or '.pdf'}"
     diag_path = cocoa_output(chains, diag_name)
     # headless output: pick a non-interactive matplotlib backend before pyplot
     # is imported (emulator.plotting imports it at load), then build it.
