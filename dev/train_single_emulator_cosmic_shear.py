@@ -65,7 +65,12 @@
 #  and narrow priors weigh equally; a PC is still a product of parameter
 #  powers, e.g. As^a H0^b omegam^c, and the axis labels spell the effective
 #  exponents out), colored the same way; a color gradient along a PC names
-#  the power-law combination the emulator finds hard. Omit for no figure.
+#  the power-law combination the emulator finds hard. Page 6: the same PCA
+#  plane colored by local training sparsity (mean whitened distance to the
+#  k nearest training points), with the fitted sparsity direction + R^2
+#  annotated: names the combinations where training coverage is thin.
+#  Aligned gradients on pages 5 and 6 say the failures are coverage;
+#  diverging ones say the hardness is intrinsic. Omit for no figure.
 #
 #- `--save` (default `emulator`): name root for the trained-emulator files,
 #  written under --root/chains with the run tag appended (like --diagnostic).

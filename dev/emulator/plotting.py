@@ -3,8 +3,9 @@
 The matplotlib figures (a colorblind-safe palette, no red/green).
 plot_history draws the training history, plot_diagnostics the multipage
 diagnostics PDF (history, coverage, the local-linear floor, the
-hard-direction regression, a chi2-colored LCDM triangle, and a
-chi2-colored ln-parameter PCA plane), and plot_learning_curves overlays
+hard-direction regression, a chi2-colored LCDM triangle, and the
+ln-parameter PCA plane colored by chi2 and by training sparsity), and
+plot_learning_curves overlays
 f(delta-chi2 > thr) vs N_train curves (the sweep / bake-off output).
 source_param_samples, dv_to_xi, and plot_xi handle the parameter-coverage
 triangle and the xi correlation-function curves. The "_"-prefixed helpers
@@ -640,17 +641,36 @@ def _lcdm_triangle_fig(source, names, dchi2, cuts=None):
   return g.fig
 
 
+def _monomial(vec, labels):
+  """
+  The product-of-powers string for one ln-space direction.
+
+  A direction with exponent vector v in ln-parameter space is the
+  monomial exp(direction) = prod_i p_i^(v_i); the string spells it
+  out with the exponents sorted by size and rescaled so the largest
+  is 1 (a direction's overall normalization is arbitrary).
+
+  Arguments:
+    vec    = (n_params,) monomial exponents of the direction.
+    labels = LaTeX labels of the parameters (no surrounding $).
+
+  Returns:
+    the mathtext string, e.g. "$\\propto \\ln[H_0^{+1.00}\\,...]$".
+  """
+  w = vec / np.abs(vec).max()
+  order = np.argsort(-np.abs(w))
+  terms = []
+  for i in order:
+    terms.append(f"{labels[i]}^{{{w[i]:+.2f}}}")
+  return r"$\propto \ln[" + r"\,".join(terms) + r"]$"
+
+
 def _pc_label(k, vec, frac, labels):
   """
   Axis label for one ln-parameter principal component.
 
-  A direction with exponent vector v in ln-parameter space is the
-  monomial
-    exp(PC) = prod_i p_i^(v_i)
-  so the label spells the component out as a product of parameter
-  powers, exponents sorted by size and rescaled so the largest is 1
-  (a direction's overall normalization is arbitrary; the plotted
-  projections keep the unit-norm eigenvector).
+  The "PCk (share of ln-var)" prefix plus the component's monomial
+  (see _monomial).
 
   Arguments:
     k      = component number (1-based, the "PC1" prefix).
@@ -664,19 +684,14 @@ def _pc_label(k, vec, frac, labels):
   Returns:
     the axis-label string (matplotlib mathtext).
   """
-  w = vec / np.abs(vec).max()
-  order = np.argsort(-np.abs(w))
-  terms = []
-  for i in order:
-    terms.append(f"{labels[i]}^{{{w[i]:+.2f}}}")
-  mono = r"\,".join(terms)
   return (f"PC{k} ({100.0 * frac:.0f}% of ln-var)  "
-          + r"$\propto \ln[" + mono + r"]$")
+          + _monomial(vec, labels))
 
 
-def _lnparam_pca_fig(source, names, dchi2):
+def _lnparam_pca_fig(source, names, color, clabel, title,
+                     fit_target=None):
   """
-  First two ln-parameter principal components, colored by chi2.
+  First two ln-parameter principal components, colored per row.
 
   Each ln parameter is centered and scaled to unit variance, and the
   PCA eigendecomposes their sample correlation matrix. The
@@ -690,17 +705,30 @@ def _lnparam_pca_fig(source, names, dchi2):
   so the axis labels report the effective exponents w_i / sigma_i
   (omega_m h^2 is one such monomial, so the base columns already
   span it; the derived column stays out, keeping the matrix
-  non-singular). The figure scatters the rows on the first two
-  components, colored by log10 delta-chi2: a color gradient along a
-  PC names the power-law combination the emulator finds hard.
-  Returns None when fewer than two LCDM columns are recognized, or
-  when a parameter is not strictly positive (ln undefined).
+  non-singular).
+
+  The scatter colors each row by `color` (clipped log10 delta-chi2
+  for the hardness page; local training sparsity for the coverage
+  page): a color gradient along a direction names the power-law
+  combination the colored quantity grows along. With `fit_target`,
+  that direction is also measured: a least-squares fit of
+  ln(fit_target) on the standardized ln parameters, annotated under
+  the title as a monomial with its R^2 (low R^2 = the quantity is
+  diffuse, not directional). Returns None when fewer than two LCDM
+  columns are recognized, or when a parameter is not strictly
+  positive (ln undefined).
 
   Arguments:
-    source = source dict with "C" (param dump) and "idx" (used rows).
-    names  = parameter column names, in the dump's column order.
-    dchi2  = (N,) per-row delta-chi2, sorted-idx order (as returned
-             by coverage_diagnostic / eval_source_chi2).
+    source     = source dict with "C" (param dump) and "idx" (used
+                 rows).
+    names      = parameter column names, in the dump's column order.
+    color      = (N,) per-row scatter colors, sorted-idx order,
+                 already transformed / clipped for display.
+    clabel     = colorbar label (mathtext allowed).
+    title      = axes title.
+    fit_target = optional (N,) positive per-row values; fits
+                 ln(fit_target) on the standardized ln parameters
+                 and annotates the fitted monomial + R^2.
 
   Returns:
     the matplotlib Figure, or None.
@@ -758,19 +786,30 @@ def _lnparam_pca_fig(source, names, dchi2):
   pcs  = Z @ evecs[:, :2]
   frac = evals / evals.sum()
 
-  # color = clipped log10 delta-chi2 (saturates at chi2 = 100 so
-  # outliers do not wash out the bulk; see _log_dchi2_color).
-  logc = _log_dchi2_color(dchi2)
+  # optional direction fit: ln(fit_target) = a + Z @ b. The fitted b
+  # over sigma gives the monomial the quantity grows along; R^2 says
+  # how directional (vs diffuse) it is.
+  fitline = None
+  if fit_target is not None:
+    t = np.log(np.maximum(np.asarray(fit_target, dtype="float64"),
+                          1e-300))
+    A = np.column_stack([np.ones(Z.shape[0]), Z])
+    coefs, *_ = np.linalg.lstsq(A, t, rcond=None)
+    pred = A @ coefs
+    ss_res = ((t - pred) ** 2).sum()
+    ss_tot = ((t - t.mean()) ** 2).sum()
+    r2 = 1.0 - ss_res / max(ss_tot, 1e-300)
+    fitline = ("grows along " + _monomial(coefs[1:] / sig, labels)
+               + f"  ($R^2$ = {r2:.2f})")
 
   fig, ax = plt.subplots(figsize=(8, 6))
   sc = ax.scatter(pcs[:, 0],        # x = PC1 projection
                   pcs[:, 1],        # y = PC2 projection
-                  c=logc,
+                  c=np.asarray(color),
                   cmap="viridis",   # sequential, colorblind-safe
                   s=4)
   # extend arrows: values continue past the clipped color ends.
-  fig.colorbar(sc, ax=ax, extend="both",
-               label=r"$\log_{10}\Delta\chi^2$")
+  fig.colorbar(sc, ax=ax, extend="both", label=clabel)
   ax.set_xlabel(_pc_label(k=1,
                           vec=expo[:, 0],
                           frac=frac[0],
@@ -779,7 +818,11 @@ def _lnparam_pca_fig(source, names, dchi2):
                           vec=expo[:, 1],
                           frac=frac[1],
                           labels=labels))
-  ax.set_title("ln-parameter PCA of the val cosmologies")
+  if fitline is None:
+    ax.set_title(title)
+  else:
+    # two-line title: the page name, then the fitted direction.
+    ax.set_title(title + "\n" + fitline, fontsize=11)
   fig.tight_layout()
   return fig
 
@@ -811,6 +854,10 @@ def plot_diagnostics(train_losses,
   Page 5: the first two ln-parameter PCA directions of the val
     cosmologies, colored the same way (a principal direction in ln
     space is a product of parameter powers), same condition.
+  Page 6: the same PCA plane colored by local training sparsity
+    (coverage's knn_dist), with the fitted sparsity direction
+    annotated -- names the combinations where training is thin,
+    independent of the chi2; same condition.
 
   floor / hard_dir / val_set are optional so a run can drop a page
   it cannot produce (e.g. the local-linear floor is defined only for
@@ -856,9 +903,13 @@ def plot_diagnostics(train_losses,
     f3.tight_layout()
     figs.append(f3)
 
-  # pages 4 + 5: where in parameter space the failures live. Page 4
-  # is the LCDM triangle (getdist lays it out itself, so no
-  # tight_layout), page 5 the ln-parameter PCA plane.
+  # pages 4-6: where in parameter space the failures live. Page 4 is
+  # the LCDM triangle (getdist lays it out itself, so no
+  # tight_layout); page 5 the ln-parameter PCA plane colored by chi2
+  # (hardness); page 6 the same plane colored by local training
+  # sparsity (coverage), with the fitted sparsity direction --
+  # aligned gradients on 5 and 6 say the failures are coverage,
+  # diverging ones say the hardness is intrinsic.
   if val_set is not None and names is not None:
     f4 = _lcdm_triangle_fig(source=val_set,
                             names=names,
@@ -868,9 +919,26 @@ def plot_diagnostics(train_losses,
       figs.append(f4)
     f5 = _lnparam_pca_fig(source=val_set,
                           names=names,
-                          dchi2=coverage["dchi2"])
+                          color=_log_dchi2_color(coverage["dchi2"]),
+                          clabel=r"$\log_{10}\Delta\chi^2$",
+                          title="ln-parameter PCA of the val "
+                                "cosmologies, colored by hardness")
     if f5 is not None:
       figs.append(f5)
+    # sparsity color: percentile-clipped so one far outlier does not
+    # own the colorbar; the direction fit uses the unclipped values.
+    knn = np.asarray(coverage["knn_dist"], dtype="float64")
+    lo, hi = np.percentile(knn, [1.0, 99.0])
+    f6 = _lnparam_pca_fig(source=val_set,
+                          names=names,
+                          color=np.clip(knn, lo, hi),
+                          clabel=(f"mean dist to {coverage['k_nn']} "
+                                  "nearest train pts (whitened)"),
+                          title="ln-parameter PCA, colored by "
+                                "training sparsity",
+                          fit_target=knn)
+    if f6 is not None:
+      figs.append(f6)
 
   _save_pages(figs, savepath)
 
