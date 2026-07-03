@@ -10,8 +10,9 @@ dataset_generator_lensing.py writes them). add_cocoa_path_args registers
 the three shared flags (--root, --fileroot, --yaml); resolve_cocoa_config reads
 $ROOTDIR, builds the two roots, ensures the project chains/ folder exists, loads
 the YAML from the fileroot, and rewrites the config's data paths to absolute so
-the experiment reads them regardless of the launch directory; cocoa_output places
-a run output under the fileroot.
+the experiment reads them regardless of the launch directory. It returns the
+config plus the fileroot (configs) and chains (data + run products) folders;
+cocoa_output places a run output under one of them.
 
 PS: ROOTDIR is the cocoa install root, an environment variable cocoa exports;
 every project path is taken relative to it.
@@ -86,19 +87,22 @@ def resolve_cocoa_config(args):
 
   Returns:
     cfg      = the parsed config mapping, its data paths made absolute.
-    fileroot = absolute emulator folder (<root>/<fileroot>), where this
-               driver's outputs go.
+    fileroot = absolute emulator folder (<root>/<fileroot>), holding the
+               YAML configs.
+    chains   = absolute project chains/ folder (<root>/chains), holding
+               the data files and this driver's run products.
   """
   # $ROOTDIR/<root>/<fileroot>, mirroring dataset_generator_lensing.py:
   # root holds the data and a chains/ folder; fileroot holds this
-  # emulator's YAML and outputs.
+  # emulator's YAML configs.
   root_env = os.environ.get("ROOTDIR")
   if not root_env:
     raise RuntimeError("ROOTDIR environment variable is not set")
   root = root_env.rstrip("/")
   root = f"{root}/{args.root.rstrip('/')}"
   fileroot = f"{root}/{args.fileroot.rstrip('/')}"
-  Path(f"{root}/chains").mkdir(parents=True, exist_ok=True)
+  chains = f"{root}/chains"
+  Path(chains).mkdir(parents=True, exist_ok=True)
 
   # the YAML lives under the emulator's fileroot; default test.yaml.
   yaml_path = (f"{fileroot}/test.yaml" if args.yaml is None
@@ -122,22 +126,24 @@ def resolve_cocoa_config(args):
       if key in data:
         data[key] = os.path.join(root, "chains", data[key])
 
-  return cfg, fileroot
+  return cfg, fileroot, chains
 
 
-def cocoa_output(fileroot, path):
+def cocoa_output(base, path):
   """
-  Place a run-output path under the emulator's fileroot.
+  Place a run-output path under a base folder.
 
-  Joins a relative output path under fileroot so figures / curves land
-  beside the emulator; an absolute path passes through unchanged
-  (os.path.join drops the earlier parts on an absolute tail).
+  Joins a relative output path under `base` (the chains folder for run
+  products like the diagnostics PDF, or the fileroot for configs); an
+  absolute path passes through unchanged (os.path.join drops the
+  earlier parts on an absolute tail).
 
   Arguments:
-    fileroot = absolute emulator folder (from resolve_cocoa_config).
-    path     = the output path, relative to fileroot or absolute.
+    base = absolute folder to place the output in (fileroot or chains,
+           both from resolve_cocoa_config).
+    path = the output path, relative to base or absolute.
 
   Returns:
     the resolved output path.
   """
-  return os.path.join(fileroot, path)
+  return os.path.join(base, path)

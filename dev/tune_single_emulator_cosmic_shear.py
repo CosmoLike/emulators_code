@@ -108,7 +108,7 @@ def main():
   # Resolve the cocoa layout (data under $ROOTDIR/<root>, YAML under
   # <fileroot>); loads the YAML and makes its data paths absolute. This
   # study only prints to stdout, so the output fileroot is discarded.
-  cfg, _ = resolve_cocoa_config(args)
+  cfg, _, _ = resolve_cocoa_config(args)
 
   # Setup -- config parse, model resolution, device, data staging, geometry,
   # chi2, per-run spec assembly -- lives in EmulatorExperiment, shared with the

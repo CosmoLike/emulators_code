@@ -315,7 +315,7 @@ def main():
   # absolute under $ROOTDIR/<root>). The parent uses cfg for the grid and
   # hands a copy (host-RAM budget set for streaming) to each GPU process;
   # absolute paths mean every spawned worker reads the same files.
-  cfg, fileroot = resolve_cocoa_config(args)
+  cfg, fileroot, _ = resolve_cocoa_config(args)
 
   # build the experiment on the real compute device (CUDA, or Apple MPS on the
   # dev machine); pool size and model name are read off it, and the serial path

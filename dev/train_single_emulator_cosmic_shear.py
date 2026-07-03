@@ -17,11 +17,11 @@
 #
 #- Cocoa layout: export $ROOTDIR, then --root names the project folder under it
 #  ($ROOTDIR/projects/lsst_y1) and --fileroot a subfolder of it holding this
-#  emulator's YAML and outputs ($ROOTDIR/projects/lsst_y1/emulators/
-#  training_scripts). The data files (dv / params / covmat) sit under
-#  --root/chains, the YAML and outputs under --fileroot. The driver resolves
-#  every path, so it runs from $ROOTDIR regardless of cwd. cosmolike's own
-#  dataset still resolves under
+#  emulator's YAML configs ($ROOTDIR/projects/lsst_y1/emulators/
+#  training_scripts). The data files (dv / params / covmat) and the run
+#  products (the diagnostics PDF) live under --root/chains; the YAML under
+#  --fileroot. The driver resolves every path, so it runs from $ROOTDIR
+#  regardless of cwd. cosmolike's own dataset still resolves under
 #  $ROOTDIR/external_modules/data. cosmolike runs only on the workstation; train
 #  there.
 #
@@ -30,8 +30,8 @@
 #
 #- `--root` (required): project folder under $ROOTDIR (e.g. projects/lsst_y1);
 #  the data files resolve under --root/chains.
-#- `--fileroot` (required): subfolder of --root holding this emulator's YAML and
-#  outputs (e.g. emulators/training_scripts).
+#- `--fileroot` (required): subfolder of --root holding this emulator's YAML
+#  configs (e.g. emulators/training_scripts).
 #- `--yaml` (default test.yaml): config file under --fileroot, holding every
 #  hyperparameter (no magic numbers in code). Two blocks:
 #  - `data`: input file names (train_dv, train_params, train_covmat, val_dv,
@@ -45,12 +45,24 @@
 #    lr (lr_base, bs_base, warmup_epochs), scheduler (mode, patience, factor),
 #    trim / focus (robustness schedules).
 #
-#- `--diagnostic` (optional): saves a multipage diagnostics PDF under --fileroot
-#  (relative path) or at an absolute path. Page 1
+#- `--diagnostic` (optional): the name root of a multipage diagnostics PDF,
+#  saved under --root/chains (an absolute path keeps its folder). The driver
+#  appends the run's identity, so `--diagnostic diagnostic.pdf` writes e.g.
+#  diagnostic_resmlp_t256_ntrain250000.pdf (model name, training temperature
+#  from the train-dv's _cs_<T> tag, staged N_train). Page 1
 #  (2x2): training history + coverage (do failures sit in sparse training
 #  regions?). Page 2: local-linear data-only floor (model vs floor delta-chi2;
 #  plain chi2fn only, skipped under --rescale). Page 3: hard-direction regression
-#  (which log-param combo predicts hardness). Omit for no figure.
+#  (which log-param combo predicts hardness). Page 4: getdist triangle of the
+#  val cosmologies over the basic LCDM parameters (A_s, n_s, H0, Omega_b,
+#  Omega_m; no tau in the dumps) plus the derived omega_m h^2, every point
+#  colored by its log10 delta-chi2, showing where in parameter space the
+#  emulator fails. Page 5: the val cosmologies on the first two principal
+#  components of the ln parameters (sample-covariance PCA; a PC in ln space
+#  is a product of parameter powers, e.g. As^a H0^b omegam^c, and the axis
+#  labels spell the exponents out), colored the same way; a color gradient
+#  along a PC names the power-law combination the emulator finds hard. Omit
+#  for no figure.
 #
 #- `--rescale` (optional, default `none`): divides out a fast analytic R so the
 #  net emulates a flatter target (chi2 stays on the original dv). `rescaled` =
@@ -84,11 +96,13 @@
 #
 #      stdout            per-epoch progress (unless train_args.silent: true) plus
 #                        a final "best epoch N: frac>0.2 ... median ..." line.
-#      <--diagnostic>    the multipage diagnostics PDF (under --fileroot), if set.
+#      <--diagnostic>_<model>_t<T>_ntrain<N>.pdf   the multipage diagnostics
+#                        PDF (under --root/chains), if --diagnostic is set.
 #-------------------------------------------------------------------------------
 
 import argparse
 import os
+import re
 
 # This script sits beside the emulator/ package (same .../emultrf/dev/ folder),
 # so launching it by path makes its own directory sys.path[0] and
@@ -103,15 +117,16 @@ from emulator.experiment import EmulatorExperiment
 def main():
   parser = argparse.ArgumentParser(
     prog="train_single_emulator_cosmic_shear")
-  # --root / --fileroot / --yaml: the cocoa project layout (data under
-  # --root, YAML + outputs under --fileroot).
+  # --root / --fileroot / --yaml: the cocoa project layout (data + run
+  # products under --root/chains, YAML configs under --fileroot).
   add_cocoa_path_args(parser)
   parser.add_argument("--diagnostic",
                       dest="diagnostic",
-                      help="if set, save a diagnostics figure (the "
-                           "training history + the coverage "
-                           "diagnostic) to this path (e.g. "
-                           "diagnostic.pdf)",
+                      help="if set, save a multipage diagnostics PDF "
+                           "under --root/chains; this is the name "
+                           "root, and the run identity is appended "
+                           "(diagnostic.pdf -> diagnostic_resmlp_"
+                           "t256_ntrain250000.pdf)",
                       type=str,
                       default=None)
   parser.add_argument("--rescale",
@@ -143,10 +158,11 @@ def main():
   args, unknown = parser.parse_known_args()
 
   # Resolve the cocoa layout: $ROOTDIR/<root> holds the data, <fileroot>
-  # (under root) holds this emulator's YAML and outputs. Loads the YAML and
-  # rewrites its data paths to absolute, so the run does not depend on the
-  # launch directory.
-  cfg, fileroot = resolve_cocoa_config(args)
+  # (under root) holds this emulator's YAML; run products (the diagnostics
+  # PDF) go to the project chains/ folder. Loads the YAML and rewrites its
+  # data paths to absolute, so the run does not depend on the launch
+  # directory.
+  cfg, _, chains = resolve_cocoa_config(args)
 
   # All setup -- config parse + model resolution + device + data staging +
   # geometry + chi2 + spec assembly -- lives in EmulatorExperiment, so a sweep
@@ -173,8 +189,23 @@ def main():
       f"median {medians[best]:.4f}")
 
   if args.diagnostic is not None:
-    # the diagnostics PDF lands under the emulator's fileroot.
-    diag_path = cocoa_output(fileroot, args.diagnostic)
+    # --diagnostic is a name root: append the run's identity so runs do
+    # not overwrite each other and the file says what produced it,
+    #   diagnostic.pdf -> diagnostic_resmlp_t256_ntrain250000.pdf
+    # tags = model name (YAML train_args.model.name), training
+    # temperature (the _cs_<T> tag in the train-dv file name, skipped
+    # when absent), and the N_train actually staged.
+    stem, ext = os.path.splitext(args.diagnostic)
+    tags = [str(cfg["train_args"]["model"].get("name", "resmlp")).lower()]
+    tmatch = re.search(r"_cs_(\d+)",
+                       os.path.basename(cfg["data"]["train_dv"]))
+    if tmatch is not None:
+      tags.append(f"t{tmatch.group(1)}")
+    tags.append(f"ntrain{exp.train_set['idx'].shape[0]}")
+    diag_name = f"{stem}_{'_'.join(tags)}{ext or '.pdf'}"
+    # a run product goes to the project chains/ folder (with the dvs),
+    # not the fileroot (which holds the YAML configs).
+    diag_path = cocoa_output(chains, diag_name)
     # headless output: pick a non-interactive matplotlib backend before pyplot
     # is imported (emulator.plotting imports it at load), then build it.
     os.environ.setdefault("MPLBACKEND", "Agg")
@@ -222,6 +253,8 @@ def main():
     else:
       log("floor: skipped (local-linear floor needs a plain "
           "chi2fn; --rescale is on)")
+    # val_set + names add page 4: the getdist LCDM triangle of the val
+    # cosmologies colored by log10 delta-chi2 (cov["dchi2"], same rows).
     plot_diagnostics(train_losses=train_losses,
                      medians=medians,
                      means=means,
@@ -230,6 +263,8 @@ def main():
                      coverage=cov,
                      floor=floor,
                      hard_dir=hd,
+                     val_set=exp.val_set,
+                     names=exp.names,
                      savepath=diag_path)
     log(f"saved diagnostics -> {diag_path}")
 

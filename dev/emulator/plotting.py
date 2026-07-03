@@ -2,8 +2,9 @@
 
 The matplotlib figures (a colorblind-safe palette, no red/green).
 plot_history draws the training history, plot_diagnostics the multipage
-diagnostics PDF (history, coverage, the local-linear floor, and the
-hard-direction regression), and plot_learning_curves overlays
+diagnostics PDF (history, coverage, the local-linear floor, the
+hard-direction regression, a chi2-colored LCDM triangle, and a
+chi2-colored ln-parameter PCA plane), and plot_learning_curves overlays
 f(delta-chi2 > thr) vs N_train curves (the sweep / bake-off output).
 source_param_samples, dv_to_xi, and plot_xi handle the parameter-coverage
 triangle and the xi correlation-function curves. The "_"-prefixed helpers
@@ -17,6 +18,7 @@ import torch
 import matplotlib
 import matplotlib.pyplot as plt
 from getdist import MCSamples
+from getdist import plots as gdplots
 
 # colorblind-safe palette, no red/green (Wong 2011 minus its green
 # and vermillion): blue, orange, reddish-purple, black, sky-blue.
@@ -336,6 +338,248 @@ def _save_pages(figs, savepath):
       plt.close(f)
 
 
+# The basic LCDM subset for the chi2-colored triangle: lowercased dump
+# names seen in covmat headers, each with its getdist LaTeX label (no
+# surrounding $). tau is not sampled in these dumps; w0 / wa and the
+# nuisances are deliberately left out (the triangle reads best small).
+_LCDM_ALIASES = (
+  ("as",      r"A_\mathrm{s}"),
+  ("as_1e9",  r"10^9 A_\mathrm{s}"),
+  ("logas",   r"\ln(10^{10} A_\mathrm{s})"),
+  ("loga",    r"\ln(10^{10} A_\mathrm{s})"),
+  ("ns",      r"n_\mathrm{s}"),
+  ("n_s",     r"n_\mathrm{s}"),
+  ("h0",      r"H_0"),
+  ("omegab",  r"\Omega_\mathrm{b}"),
+  ("omega_b", r"\Omega_\mathrm{b}"),
+  ("omegam",  r"\Omega_\mathrm{m}"),
+  ("omega_m", r"\Omega_\mathrm{m}"),
+)
+
+
+def _lcdm_columns(names):
+  """
+  The LCDM subset of a dump's parameter names, with LaTeX labels.
+
+  Matches each name (case-insensitively) against _LCDM_ALIASES and
+  returns the ones present, in the alias table's canonical order
+  (A_s, n_s, H0, Omega_b, Omega_m). Names the table does not know
+  (w0, wa, photo-z shifts, IA amplitudes) are skipped.
+
+  Arguments:
+    names = parameter column names, in the dump's column order.
+
+  Returns:
+    (kept, labels): the matched dump names and their labels.
+  """
+  kept   = []
+  labels = []
+  for alias, label in _LCDM_ALIASES:
+    for n in names:
+      if n.lower() == alias and n not in kept:
+        kept.append(n)
+        labels.append(label)
+  return kept, labels
+
+
+def _lcdm_triangle_fig(source, names, dchi2):
+  """
+  getdist triangle of a source's LCDM parameters, colored by chi2.
+
+  Each off-diagonal panel is a scatter of the source's cosmologies
+  (one point per used row, in the same sorted-idx order
+  eval_source_chi2 scores), colored by log10 delta-chi2; the
+  diagonal shows the 1D densities. It answers where in LCDM space
+  the emulator fails, not just how often. When both Omega_m and H0
+  are present, the derived omega_m h^2 = Omega_m (H0/100)^2 (the
+  structure-amplitude direction) is appended as an extra triangle
+  axis. Returns None when fewer than two LCDM columns are
+  recognized in `names`.
+
+  Arguments:
+    source = source dict with "C" (param dump) and "idx" (used rows).
+    names  = parameter column names, in the dump's column order.
+    dchi2  = (N,) per-row delta-chi2, sorted-idx order (as returned
+             by coverage_diagnostic / eval_source_chi2).
+
+  Returns:
+    the matplotlib Figure of the triangle, or None.
+  """
+  lcdm, labels = _lcdm_columns(names)
+  if len(lcdm) < 2:
+    return None
+
+  rows = np.sort(source["idx"])
+  # raw physical parameters of the used rows (never whitened).
+  P = np.asarray(source["C"][rows], dtype="float64")
+  cols = []
+  for n in lcdm:
+    cols.append(names.index(n))
+
+  # color = log10 delta-chi2 (it spans decades); the floor guards
+  # log10 against a numerically zero chi2.
+  c = np.asarray(dchi2, dtype="float64")
+  logc = np.log10(np.maximum(c, 1e-12))
+
+  # derived omega_m h^2 = Omega_m * (H0 / 100)^2, added as its own
+  # triangle axis when both parents are among the matched columns
+  # (a derived column appended before MCSamples is built).
+  vals = P[:, cols]
+  i_h0 = None
+  i_om = None
+  for i, n in enumerate(lcdm):
+    if n.lower() == "h0":
+      i_h0 = i
+    if n.lower() in ("omegam", "omega_m"):
+      i_om = i
+  plot_names = list(lcdm)
+  all_labels = list(labels)
+  columns    = [vals]
+  if i_h0 is not None and i_om is not None:
+    omh2 = vals[:, i_om] * (vals[:, i_h0] / 100.0) ** 2
+    columns.append(omh2[:, None])
+    plot_names.append("omegamh2")
+    all_labels.append(r"\Omega_\mathrm{m} h^2")
+
+  # one extra MCSamples column holds the color, so getdist's
+  # plot_3d_with_param can read it by name.
+  columns.append(logc[:, None])
+  data = np.concatenate(columns, axis=1)
+  samples = MCSamples(samples=data,
+                      names=plot_names + ["logdchi2"],
+                      labels=all_labels + [r"\log_{10}\Delta\chi^2"],
+                      settings={"smooth_scale_1D": 0.3,
+                                "smooth_scale_2D": 0.3,
+                                "fine_bins_2D": 512})
+
+  g = gdplots.get_subplot_plotter(width_inch=9)
+  # viridis: sequential and colorblind-safe (the palette rule).
+  g.settings.colormap_scatter = "viridis"
+  # plot_3d_with_param turns every off-diagonal panel into a scatter
+  # colored by that column, with one shared colorbar.
+  g.triangle_plot(samples,
+                  plot_names,
+                  plot_3d_with_param="logdchi2")
+  return g.fig
+
+
+def _pc_label(k, vec, frac, labels):
+  """
+  Axis label for one ln-parameter principal component.
+
+  A direction v in ln-parameter space is the monomial
+    exp(PC) = prod_i p_i^(v_i)
+  so the label spells the component out as a product of parameter
+  powers, exponents sorted by size and rescaled so the largest is 1
+  (a direction's overall normalization is arbitrary; the plotted
+  projections keep the unit-norm eigenvector).
+
+  Arguments:
+    k      = component number (1-based, the "PC1" prefix).
+    vec    = (n_params,) eigenvector of the ln-parameter covariance.
+    frac   = this component's share of the total ln-variance.
+    labels = LaTeX labels of the parameters (no surrounding $).
+
+  Returns:
+    the axis-label string (matplotlib mathtext).
+  """
+  w = vec / np.abs(vec).max()
+  order = np.argsort(-np.abs(w))
+  terms = []
+  for i in order:
+    terms.append(f"{labels[i]}^{{{w[i]:+.2f}}}")
+  mono = r"\,".join(terms)
+  return (f"PC{k} ({100.0 * frac:.0f}% of ln-var)  "
+          + r"$\propto \ln[" + mono + r"]$")
+
+
+def _lnparam_pca_fig(source, names, dchi2):
+  """
+  First two ln-parameter principal components, colored by chi2.
+
+  Computes the sample covariance of the ln of the LCDM parameters
+  over the source's used rows and eigendecomposes it (a PCA). In ln
+  space a principal direction is a product of parameter powers,
+    exp(PC) = As^a * ns^b * H0^c * ...,
+  the natural family of physical degeneracy directions (omega_m h^2
+  is one such monomial, so the base columns already span it; the
+  derived column stays out, keeping the covariance non-singular).
+  The figure scatters the rows on the first two components, colored
+  by log10 delta-chi2: a color gradient along a PC names the
+  power-law combination the emulator finds hard. Returns None when
+  fewer than two LCDM columns are recognized, or when a parameter is
+  not strictly positive (ln undefined).
+
+  Arguments:
+    source = source dict with "C" (param dump) and "idx" (used rows).
+    names  = parameter column names, in the dump's column order.
+    dchi2  = (N,) per-row delta-chi2, sorted-idx order (as returned
+             by coverage_diagnostic / eval_source_chi2).
+
+  Returns:
+    the matplotlib Figure, or None.
+  """
+  lcdm, labels = _lcdm_columns(names)
+  if len(lcdm) < 2:
+    return None
+
+  rows = np.sort(source["idx"])
+  # raw physical parameters of the used rows (never whitened).
+  P = np.asarray(source["C"][rows], dtype="float64")
+  cols = []
+  for n in lcdm:
+    cols.append(names.index(n))
+  V = P[:, cols]
+  if np.any(V <= 0.0):
+    return None
+
+  # center the ln parameters and take their sample covariance.
+  L = np.log(V)
+  X = L - L.mean(axis=0)
+  S = np.cov(X, rowvar=False)
+
+  # eigh returns ascending eigenvalues; flip to descending so
+  # column j of evecs is the j-th principal direction.
+  evals, evecs = np.linalg.eigh(S)
+  order = np.argsort(evals)[::-1]
+  evals = evals[order]
+  evecs = evecs[:, order]
+
+  # deterministic sign: make the largest-|weight| exponent positive
+  # (an eigenvector's sign is arbitrary; this fixes the label).
+  for j in range(2):
+    imax = np.argmax(np.abs(evecs[:, j]))
+    if evecs[imax, j] < 0.0:
+      evecs[:, j] = -evecs[:, j]
+
+  # project the centered ln parameters on the first two directions.
+  pcs  = X @ evecs[:, :2]
+  frac = evals / evals.sum()
+
+  # color = log10 delta-chi2, floored against a numerically zero chi2.
+  c = np.asarray(dchi2, dtype="float64")
+  logc = np.log10(np.maximum(c, 1e-12))
+
+  fig, ax = plt.subplots(figsize=(8, 6))
+  sc = ax.scatter(pcs[:, 0],        # x = PC1 projection
+                  pcs[:, 1],        # y = PC2 projection
+                  c=logc,
+                  cmap="viridis",   # sequential, colorblind-safe
+                  s=4)
+  fig.colorbar(sc, ax=ax, label=r"$\log_{10}\Delta\chi^2$")
+  ax.set_xlabel(_pc_label(k=1,
+                          vec=evecs[:, 0],
+                          frac=frac[0],
+                          labels=labels))
+  ax.set_ylabel(_pc_label(k=2,
+                          vec=evecs[:, 1],
+                          frac=frac[1],
+                          labels=labels))
+  ax.set_title("ln-parameter PCA of the val cosmologies")
+  fig.tight_layout()
+  return fig
+
+
 def plot_diagnostics(train_losses,
                      medians,
                      means,
@@ -344,6 +588,8 @@ def plot_diagnostics(train_losses,
                      coverage,
                      floor=None,
                      hard_dir=None,
+                     val_set=None,
+                     names=None,
                      savepath=None):
   """
   All available diagnostics as a single multipage figure / PDF.
@@ -355,10 +601,15 @@ def plot_diagnostics(train_losses,
     delta-chi2), if `floor` is given.
   Page 3: the hard-direction regression (univariate ranking and
     joint log-linear coefficients), if `hard_dir` is given.
+  Page 4: the getdist LCDM triangle of the val cosmologies, colored
+    by log10 delta-chi2, if `val_set` and `names` are given.
+  Page 5: the first two ln-parameter PCA directions of the val
+    cosmologies, colored the same way (a principal direction in ln
+    space is a product of parameter powers), same condition.
 
-  floor / hard_dir are optional so a run can drop a page it cannot
-  produce (e.g. the local-linear floor is defined only for a plain
-  chi2fn, so a --rescale run omits it).
+  floor / hard_dir / val_set are optional so a run can drop a page
+  it cannot produce (e.g. the local-linear floor is defined only for
+  a plain chi2fn, so a --rescale run omits it).
 
   Arguments:
     train_losses, medians, means, fracs, thresholds = the
@@ -366,6 +617,9 @@ def plot_diagnostics(train_losses,
     coverage = the dict coverage_diagnostic returned.
     floor    = the dict local_linear_floor returned, or None.
     hard_dir = the dict hard_direction_regression returned, or None.
+    val_set  = the validation source dict ("C" / "idx"), or None;
+               its rows must be the ones coverage's dchi2 scored.
+    names    = parameter column names in the dump's order, or None.
     savepath = if given, write a (multipage) PDF there and close;
                if None, show each page interactively.
   """
@@ -392,6 +646,21 @@ def plot_diagnostics(train_losses,
     _hard_direction_panels(a3[0], a3[1], hard_dir)
     f3.tight_layout()
     figs.append(f3)
+
+  # pages 4 + 5: where in parameter space the failures live. Page 4
+  # is the LCDM triangle (getdist lays it out itself, so no
+  # tight_layout), page 5 the ln-parameter PCA plane.
+  if val_set is not None and names is not None:
+    f4 = _lcdm_triangle_fig(source=val_set,
+                            names=names,
+                            dchi2=coverage["dchi2"])
+    if f4 is not None:
+      figs.append(f4)
+    f5 = _lnparam_pca_fig(source=val_set,
+                          names=names,
+                          dchi2=coverage["dchi2"])
+    if f5 is not None:
+      figs.append(f5)
 
   _save_pages(figs, savepath)
 
