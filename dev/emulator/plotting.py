@@ -952,6 +952,9 @@ def plot_diagnostics(train_losses,
                           clabel=r"$\log_{10}\Delta\chi^2$",
                           title="ln-parameter PCA of the val "
                                 "cosmologies, colored by hardness",
+                          fit_target=np.maximum(
+                            np.asarray(coverage["dchi2"],
+                                       dtype="float64"), 1e-12),
                           vmin=_CHI2_CBAND[0],
                           vmax=_CHI2_CBAND[1])
     if f5 is not None:

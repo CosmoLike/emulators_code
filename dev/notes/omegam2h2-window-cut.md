@@ -11,6 +11,14 @@ cs_256 dump, val cs_128/2): best frac>0.2 = 0.59, median 0.30, catastrophic
 tail to dchi2 ~ 1e8. Diagnostics: coverage-limited (sparse-region failures),
 hardness R^2 low, omega_b h^2 NOT the driver (matches the T=16 story).
 
+**THE LIVE CUTS (user-confirmed 2026-07-03, their production YAML):**
+
+    omegabh2_cut: 0.035    # omega_b h^2 upper bound
+    omegabh2_lo:  0.005    # omega_b h^2 lower bound (user chose 0.005,
+                           # looser than the suggested 0.014)
+    omegam2h2_lo: 0.015    # Gamma^2 window
+    omegam2h2_hi: 0.08
+
 **The new cut (user's call, implemented): 0.015 < omegam^2 h^2 < 0.08.**
 omegam^2 h^2 = (Omega_m H0/100)^2 = Gamma^2 with Gamma = Omega_m h (the
 transfer shape parameter); Planck sits at 0.045, dead center.
