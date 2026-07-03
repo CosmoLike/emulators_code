@@ -11,8 +11,8 @@
 #
 #     python external_modules/code/emulators/emultrf/dev/sweep_ntrain_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
-#       --fileroot emulators/nla_cosmic_shear/ \
-#       --yaml test.yaml \
+#       --fileroot emulators/training_scripts/ \
+#       --yaml train_single_emulator_cosmic_shear.yaml \
 #       --n-min 2000 --n-points 6 --out ntrain_resmlp
 #
 #- Reuses the training driver's YAML (and its model/rescale/activation choices).
@@ -36,7 +36,7 @@
 #
 #- `--root` (required): project folder under $ROOTDIR (data resolves under it);
 #  `--fileroot` (required): subfolder holding the YAML and curve outputs (e.g.
-#  emulators/nla_cosmic_shear). Cocoa layout, as in the training driver.
+#  emulators/training_scripts). Cocoa layout, as in the training driver.
 #- `--yaml` (default test.yaml): config under --fileroot (data + train_args),
 #  training-driver schema; train_args.model.name picks ResMLP / ResCNN. The
 #  `data` block lists bare filenames, resolved under --root/chains.

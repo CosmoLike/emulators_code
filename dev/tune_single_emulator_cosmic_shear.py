@@ -10,8 +10,8 @@
 #
 #     python external_modules/code/emulators/emultrf/dev/tune_single_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
-#       --fileroot emulators/nla_cosmic_shear/ \
-#       --yaml tune.yaml \
+#       --fileroot emulators/training_scripts/ \
+#       --yaml train_single_emulator_cosmic_shear.yaml \
 #       --n-trials 50 --timeout 4200
 #
 #- The searched hyperparameters come from the YAML train_args block. Each leaf is
@@ -30,7 +30,7 @@
 #
 #- `--root` (required): project folder under $ROOTDIR (data resolves under it);
 #  `--fileroot` (required): subfolder holding the YAML (e.g.
-#  emulators/nla_cosmic_shear). Cocoa layout, as in the training driver.
+#  emulators/training_scripts). Cocoa layout, as in the training driver.
 #- `--yaml` (default test.yaml): config under --fileroot, `data` + `train_args`
 #  blocks (training driver schema; train_args may now carry ranges). The `data`
 #  block lists bare filenames, resolved under --root/chains.

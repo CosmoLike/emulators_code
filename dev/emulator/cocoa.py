@@ -4,7 +4,7 @@ The drivers run inside the cocoa framework, launched from $ROOTDIR rather than
 from the data folder, so every path is resolved against the project layout
 instead of the current directory. A --root names the project folder under
 $ROOTDIR (e.g. projects/lsst_y1), a --fileroot a subfolder of it holding this
-emulator's YAML and outputs (e.g. emulators/nla_cosmic_shear), and the training
+emulator's YAML and outputs (e.g. emulators/training_scripts), and the training
 / validation data files sit under the project's chains/ folder (where
 dataset_generator_lensing.py writes them). add_cocoa_path_args registers
 the three shared flags (--root, --fileroot, --yaml); resolve_cocoa_config reads
@@ -57,7 +57,7 @@ def add_cocoa_path_args(parser):
                       dest="fileroot",
                       help="subfolder of --root holding this emulator's "
                            "YAML and outputs (e.g. "
-                           "emulators/nla_cosmic_shear)",
+                           "emulators/training_scripts)",
                       type=str,
                       required=True)
   parser.add_argument("--yaml",

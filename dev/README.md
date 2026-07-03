@@ -395,18 +395,18 @@ D=external_modules/code/emulators/emultrf/dev
 
 # one run
 python $D/train_single_emulator_cosmic_shear.py \
-  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
-  --yaml test.yaml --diagnostic out.pdf
+  --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
+  --yaml train_single_emulator_cosmic_shear.yaml --diagnostic out.pdf
 
 # N_train learning curve across all GPUs
 python $D/sweep_ntrain_emulator_cosmic_shear.py \
-  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
-  --yaml test.yaml --n-points 8 --out curve
+  --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
+  --yaml train_single_emulator_cosmic_shear.yaml --n-points 8 --out curve
 
 # activation bake-off across GPUs
 python $D/bakeoff_activation_emulator_cosmic_shear.py \
-  --root projects/lsst_y1/ --fileroot emulators/nla_cosmic_shear/ \
-  --yaml test.yaml --out bakeoff
+  --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
+  --yaml train_single_emulator_cosmic_shear.yaml --out bakeoff
 ```
 
 The YAML has two blocks: `data` (bare input filenames resolved under
@@ -415,7 +415,7 @@ The YAML has two blocks: `data` (bare input filenames resolved under
 with `train_args.model.name` (`resmlp` | `rescnn`). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
 list is searched. Templates live in `example_yamls/`; copy one into your
-`--fileroot` (e.g. as `test.yaml`) and edit it.
+`--fileroot` (e.g. `train_single_emulator_cosmic_shear.yaml`) and edit it.
 
 ---
 

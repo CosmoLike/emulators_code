@@ -11,14 +11,14 @@
 #
 #     python external_modules/code/emulators/emultrf/dev/train_single_emulator_cosmic_shear.py \
 #       --root projects/lsst_y1/ \
-#       --fileroot emulators/nla_cosmic_shear/ \
-#       --yaml test.yaml \
+#       --fileroot emulators/training_scripts/ \
+#       --yaml train_single_emulator_cosmic_shear.yaml \
 #       --diagnostic diagnostic.pdf
 #
 #- Cocoa layout: export $ROOTDIR, then --root names the project folder under it
 #  ($ROOTDIR/projects/lsst_y1) and --fileroot a subfolder of it holding this
 #  emulator's YAML and outputs ($ROOTDIR/projects/lsst_y1/emulators/
-#  nla_cosmic_shear). The data files (dv / params / covmat) sit under
+#  training_scripts). The data files (dv / params / covmat) sit under
 #  --root/chains, the YAML and outputs under --fileroot. The driver resolves
 #  every path, so it runs from $ROOTDIR regardless of cwd. cosmolike's own
 #  dataset still resolves under
@@ -31,7 +31,7 @@
 #- `--root` (required): project folder under $ROOTDIR (e.g. projects/lsst_y1);
 #  the data files resolve under --root/chains.
 #- `--fileroot` (required): subfolder of --root holding this emulator's YAML and
-#  outputs (e.g. emulators/nla_cosmic_shear).
+#  outputs (e.g. emulators/training_scripts).
 #- `--yaml` (default test.yaml): config file under --fileroot, holding every
 #  hyperparameter (no magic numbers in code). Two blocks:
 #  - `data`: input file names (train_dv, train_params, train_covmat, val_dv,
