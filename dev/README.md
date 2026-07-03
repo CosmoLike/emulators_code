@@ -1,3 +1,5 @@
+**Warning** This pipeline is still in alpha stage `v0.05` and not ready for production. 
+
 # Cosmic-shear data-vector emulator
 
 A neural emulator that maps cosmological parameters to the masked cosmic-shear
@@ -16,9 +18,10 @@ bake-off).
 4. [Change X → edit Y](#4-change-x--edit-y)
 5. [Variants](#5-variants)
 6. [Run it](#6-run-it)
-7. [Appendix: the chi2 metric (Mahalanobis)](#7-appendix-the-chi2-metric-mahalanobis)
-8. [Appendix: activation functions](#8-appendix-activation-functions)
-9. [Appendix: every file's functions](#9-appendix-every-files-functions)
+7. [Appendix: AI-Usage](#7-appendix-ai-usage)
+8. [Appendix: the chi2 metric (Mahalanobis)](#8-appendix-the-chi2-metric-mahalanobis)
+9. [Appendix: activation functions](#9-appendix-activation-functions)
+10. [Appendix: every file's functions](#10-appendix-every-files-functions)
     1. [`data_staging.py`](#apx-data_staging)
     2. [`geometries_parameter.py`](#apx-geometries_parameter)
     3. [`geometries_output.py`](#apx-geometries_output)
@@ -419,7 +422,19 @@ list is searched. Templates live in `example_yamls/`; copy one into your
 
 ---
 
-## 7. Appendix: the chi2 metric (Mahalanobis)
+## 7. Appendix: AI-Usage
+
+**AI Usage**: This library (under the `dev` folder) was developed with Claude Code assistance. However, Prof. Miranda heavily influenced 
+the code at every level, from macro-designed implementation and changes to minute Python choices.
+The initial version of this library was developed in a [Jupyter Notebook](https://github.com/vivianmiranda/learningpytorch/blob/main/pytorch1.ipynb) in which the AI didn't have writing privileges. Prof. Miranda spent hundreds of hours (it will reach 1000 hours for sure by the time this pipeline reaches v1.0) working on this pipeline and studying the Book Deep Learning with PyTorch to make sure she was not `vibe coding` (which Prof. Miranda strongly opposes).  Claude AI was a fast pair of hands and a super-smart compiler. There were a few exceptions where AI took the driving seat, mostly related to some obscure PyTorch functions and multi-gpu scheduling. Even in these cases, Prof. Miranda studied and edited every corner of the code, and also tested it in numerous ways (and it is continuing to test it). Prof. Miranda is ready to go on the blackboard and discuss every choice, every function, every quirk of the code at any time. 
+
+When I asked Claude code to review the paragraph above, the AI answer was (this repository has a copy of the Claude memory files)
+
+<img width="1000" alt="Screenshot 2026-06-30 at 7 12 00 PM" src="https://github.com/user-attachments/assets/e9a59983-cbbc-4a21-b962-9ee4ece4df7f" />
+
+---
+
+## 8. Appendix: the chi2 metric (Mahalanobis)
 
 The loss and the reported metric are both a **chi2**, which is a squared
 **Mahalanobis distance** — the distance between two points measured *in units of
@@ -465,7 +480,7 @@ units, with correlations removed).
 
 ---
 
-## 8. Appendix: activation functions
+## 9. Appendix: activation functions
 
 The `ResBlock` nonlinearity is a **learnable, per-feature activation**: every
 feature (one entry of the vector) carries its own shape parameters, trained with
@@ -547,7 +562,7 @@ $K$ (the gate count for the multi-gate families) is `make_activation`'s
 
 ---
 
-## 9. Appendix: every file's functions
+## 10. Appendix: every file's functions
 
 One line per function / class / method. For full detail, read the docstring in
 the file itself; this is the index.
