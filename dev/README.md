@@ -132,9 +132,10 @@ and only `N_train` rows are kept. The result is a "source" dict (`C`, `dv`,
                            ▼
                  seeded shuffle             randperm(n, gen)   (split_seed)
                            ▼
-                 physical cuts              phys_cut_idx: keep omega_b h^2 < cut
-                           ▼                 + lo < omegam^2 h^2 < hi (optional);
-                           │                 omegab/omegam/H0 columns found by name
+                 physical cuts              phys_cut_idx: keep lo < omega_b h^2 < cut
+                           ▼                 + lo < omegam^2 h^2 < hi (lower bounds
+                           │                 + window optional); omegab/omegam/H0
+                           │                 columns found by name
                  keep N_train               idx = phys[:n_keep  or  N // divisor]
                            ▼
             stage_source:  subset bytes < ram_frac · available RAM ?
@@ -575,7 +576,7 @@ Turns on-disk dumps into in-memory "source" dicts.
 
 - `load_source(...)` — orchestrator: memmap the dv, load + cut the params, keep `N_train` rows, stage, return `{C, dv, idx (+ means)}`.
 - `stage_source(C, dv, idx, ram_frac)` — materialize the used rows in RAM if they fit, else keep the memmap (reindex local).
-- `phys_cut_idx(C, idx, names, cut, omegam2h2_lo, omegam2h2_hi)` — keep the rows with `omega_b h^2 < cut` and (optionally) `lo < omegam^2 h^2 < hi`.
+- `phys_cut_idx(C, idx, names, cut, omegabh2_lo, omegam2h2_lo, omegam2h2_hi)` — keep the rows with `omega_b h^2` in `(omegabh2_lo, cut)` and (optionally) `lo < omegam^2 h^2 < hi`.
 - `stream_chunks(idx, chunk)` — yield sorted row-index blocks (sequential disk reads).
 - `stream_stats(mm, idx, method, CHUNK)` — per-column mean/std (or min/max) over the used rows, streamed (never loads the dump whole).
 - `param_stats(arr, idx, method)` — the same stats for the in-RAM parameter array.

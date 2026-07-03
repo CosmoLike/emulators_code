@@ -17,6 +17,8 @@ data:
   cosmolike_dataset:  lsst_y1_M1_GGL0.05.dataset
 
   omegabh2_cut:  0.035   # drop omega_b h^2 >= this (the hard corner)
+  omegabh2_lo:   0.014   # ... and <= this (Planck omega_b h^2 = 0.0224;
+                         # omit for no lower cut)
   omegam2h2_lo:  0.015   # keep omegam^2 h^2 = (Omega_m H0/100)^2 above this
   omegam2h2_hi:  0.08    # ... and below this (both tails are rarefied and
                          # fail; Planck sits at 0.045; omit a key for no cut)

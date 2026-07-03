@@ -36,8 +36,9 @@
 #  hyperparameter (no magic numbers in code). Two blocks:
 #  - `data`: input file names (train_dv, train_params, train_covmat, val_dv,
 #    val_params -- bare filenames, resolved under --root/chains), cut/split
-#    settings (omegabh2_cut, the optional omegam2h2_lo / omegam2h2_hi window
-#    on omegam^2 h^2, train_divisor, val_divisor, split_seed, ram_frac),
+#    settings (omegabh2_cut and the optional omegabh2_lo lower bound; the
+#    optional omegam2h2_lo / omegam2h2_hi window on omegam^2 h^2;
+#    train_divisor, val_divisor, split_seed, ram_frac),
 #    cosmolike dataset (cosmolike_data_dir, cosmolike_dataset; resolved under
 #    $ROOTDIR/external_modules/data, not --root).
 #  - `train_args`: knobs (nepochs, bs, loss_mode, silent) plus sub-blocks model
@@ -347,6 +348,7 @@ def main():
                      val_set=exp.val_set,
                      names=exp.names,
                      cuts={"omegabh2_cut": cfg["data"].get("omegabh2_cut"),
+                           "omegabh2_lo": cfg["data"].get("omegabh2_lo"),
                            "omegam2h2_lo": cfg["data"].get("omegam2h2_lo"),
                            "omegam2h2_hi": cfg["data"].get("omegam2h2_hi")},
                      savepath=diag_path)

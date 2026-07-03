@@ -48,6 +48,21 @@ pool cannot supply it. cs_128 val with val_divisor 2 (keep 12.5k) is
 right at the edge once the window is on (obh2 ~0.81 x window ~0.61 of
 25k ~ 12.3k) -- use val_divisor 3+ (or n_keep) with the window active.
 
+**OUTCOME (same day, 1500 epochs, bs 768, 17 min total at 0.68 s/epoch):
+frac>0.2 = 0.156, median = 0.053** (vs 0.59 / 0.30 uncut, 50 min) -- best
+epoch 1497, ladder 0.5: 0.058, 1: 0.028, 10: 0.005, 100: 0.002; val mean
+plateaus at ~22 (owned by the residual 0.2% tail). Post-cut diagnostics:
+(1) the residual failures HUG THE CUT BOUNDARIES in the triangle (one-sided
+training support at the window edge), plus a diffuse scatter; (2) the
+hard-direction joint R^2 fell 0.35 -> 0.18 (hardness now mostly diffuse;
+leading combo again As * omegam * H0 = structure amplitude, omegab
+irrelevant); (3) LSST_A1_1 (IA amplitude) now 5th in the univariate ranking
+-- first hint the wide-prior IA direction starts costing at T=256 (the
+[[npce-and-ia-template-factoring]] lever's regime). Only 250k of the ~1M
+post-cut pool was used -> the N_train sweep is the obvious next lever;
+after that, a train-wider-grade-narrower buffer strip would address the
+boundary-hugging (needs separate train/val window keys, not yet built).
+
 **Why:** records the cut's evidence and the framing lesson (failure-cut
 vs coverage-cut: with divisor-drawn N_train, cutting no-man's-land is
 densification, not data loss), so future probes (ggl/wtheta) and dataset

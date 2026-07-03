@@ -166,14 +166,14 @@ def stage_source(C, dv, idx, ram_frac=0.7):
   return C, dv, idx
 
 
-def phys_cut_idx(C, idx, names, cut,
+def phys_cut_idx(C, idx, names, cut, omegabh2_lo=None,
                  omegam2h2_lo=None, omegam2h2_hi=None):
   """
   Keep only rows inside the physical-density cuts.
 
   Two cuts, each on a derived product a per-parameter scan misses:
 
-    omega_b h^2  = Omega_b * (H0/100)^2          <  cut
+    omega_b h^2  = Omega_b * (H0/100)^2   inside (omegabh2_lo, cut)
     omegam^2 h^2 = (Omega_m * H0/100)^2   inside (omegam2h2_lo,
                                                   omegam2h2_hi)
 
@@ -194,6 +194,8 @@ def phys_cut_idx(C, idx, names, cut,
     names = parameter column names in C's column order; locate
             the omegab, omegam, and H0 columns by name.
     cut   = upper bound on omega_b h^2 (rows >= cut dropped).
+    omegabh2_lo  = optional lower bound on omega_b h^2 (rows at or
+                   below it dropped; None = no lower cut).
     omegam2h2_lo = optional lower bound on omegam^2 h^2 (rows at
                    or below it dropped; None = no lower cut).
     omegam2h2_hi = optional upper bound on omegam^2 h^2 (rows at
@@ -206,6 +208,8 @@ def phys_cut_idx(C, idx, names, cut,
   i_h0 = names.index("H0")         # Hubble column (km/s/Mpc)
   obh2 = C[idx, i_ob] * (C[idx, i_h0] / 100.0) ** 2
   keep = obh2 < cut
+  if omegabh2_lo is not None:
+    keep &= obh2 > omegabh2_lo
   if omegam2h2_lo is not None or omegam2h2_hi is not None:
     i_om = names.index("omegam")   # matter density column
     #   omegam^2 h^2 = (Omega_m * H0/100)^2 = Gamma^2
@@ -240,6 +244,7 @@ def read_param_names(covmat_path, comment="#"):
 def load_source(dv_path, params_path, names, cut, divisor=None,
                 gen=None, ram_frac=0.7, with_means=False,
                 param_cols=slice(2, -1), verbose=True, n_keep=None,
+                omegabh2_lo=None,
                 omegam2h2_lo=None, omegam2h2_hi=None):
   """
   Load, physically cut, and stage one dv/param source.
@@ -274,6 +279,8 @@ def load_source(dv_path, params_path, names, cut, divisor=None,
     n_keep      = absolute rows to keep (overrides divisor; for a
                   learning-curve sweep at explicit sizes). Pass
                   this or divisor.
+    omegabh2_lo  = optional lower bound on omega_b h^2 (None = no
+                   lower cut; `cut` stays the upper bound).
     omegam2h2_lo = optional lower bound on omegam^2 h^2 (the
                    Gamma^2 window, see phys_cut_idx; None = no
                    lower cut).
@@ -302,6 +309,7 @@ def load_source(dv_path, params_path, names, cut, divisor=None,
   n     = C.shape[0]
   order = torch.randperm(n, generator=gen).numpy()
   phys  = phys_cut_idx(C=C, idx=order, names=names, cut=cut,
+                       omegabh2_lo=omegabh2_lo,
                        omegam2h2_lo=omegam2h2_lo,
                        omegam2h2_hi=omegam2h2_hi)
   # rows to keep: an absolute n_keep, or N // divisor.

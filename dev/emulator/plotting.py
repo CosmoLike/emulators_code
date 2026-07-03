@@ -90,14 +90,20 @@ def _history_panels(ax_loss, ax_frac, train_losses, medians,
   ax_frac.legend(frameon=False, title="delta chi2")
 
 
-def _log_dchi2_color(dchi2, lo=-2.0, hi=2.0):
+# the chi2 color band in log10: floor and saturation shared by every
+# chi2-colored scatter, and the pinned colorbar limits (pinning keeps
+# the colorbars identical across runs and pages, so shades compare).
+_CHI2_CBAND = (-2.0, 1.5)
+
+
+def _log_dchi2_color(dchi2, lo=_CHI2_CBAND[0], hi=_CHI2_CBAND[1]):
   """
   log10 delta-chi2 clipped to a fixed color band.
 
   The raw chi2 spans many decades and a handful of catastrophic
   outliers would set the color scale, washing every ordinary point
   into one dark shade. Clipping to [lo, hi] (default delta-chi2 in
-  [0.01, 100]) spends the whole colormap on the decision-relevant
+  [0.01, ~30]) spends the whole colormap on the decision-relevant
   band around the 0.2 goal; anything beyond saturates at the end
   color. The floor also guards log10 against a numerically zero
   chi2.
@@ -105,7 +111,7 @@ def _log_dchi2_color(dchi2, lo=-2.0, hi=2.0):
   Arguments:
     dchi2 = per-point delta-chi2 values.
     lo    = lower color bound in log10 (default -2, chi2 = 0.01).
-    hi    = upper color bound in log10 (default +2, chi2 = 100).
+    hi    = upper color bound in log10 (default +1.5, chi2 ~ 30).
 
   Returns:
     (N,) clipped log10 values, ready to be a scatter color.
@@ -135,11 +141,17 @@ def _coverage_panels(ax_scatter, ax_hist, knn_dist, dchi2, k_nn):
 
   # (a) hardness vs local sparsity. x = knn_dist, y = log10 dchi2
   # (full range, so outliers stay visible as points); color = the
-  # clipped log10 (saturates at chi2 = 100, so the bulk keeps color
-  # resolution). The dashed line is the 0.2 goal.
-  sc = ax_scatter.scatter(knn_dist, y, s=5,
-                          c=_log_dchi2_color(dchi2),
-                          cmap="viridis")
+  # clipped log10 (saturated ends, so the bulk keeps color
+  # resolution). Points draw dark-to-bright so the rare hard ones
+  # sit on top of the overplotted bulk instead of being buried.
+  # The dashed line is the 0.2 goal.
+  c = _log_dchi2_color(dchi2)
+  order = np.argsort(c)
+  sc = ax_scatter.scatter(knn_dist[order], y[order], s=5,
+                          c=c[order],
+                          cmap="viridis",
+                          vmin=_CHI2_CBAND[0],
+                          vmax=_CHI2_CBAND[1])
   ax_scatter.axhline(np.log10(0.2), color="0.4", lw=1, ls="--")
   ax_scatter.set_xlabel(f"mean dist to {k_nn} nearest train pts")
   ax_scatter.set_ylabel(r"$\log_{10}\,\Delta\chi^2$")
@@ -467,22 +479,30 @@ def _cut_exclusion(rx, ry, xx, yy, cuts):
   Arguments:
     rx, ry = cut roles of the panel's x and y axes (see _cut_role).
     xx, yy = meshgrid of axis values covering the panel.
-    cuts   = mapping with "omegabh2_cut" / "omegam2h2_lo" /
-             "omegam2h2_hi" (any may be None = that cut is off).
+    cuts   = mapping with "omegabh2_cut" / "omegabh2_lo" /
+             "omegam2h2_lo" / "omegam2h2_hi" (any may be None =
+             that cut is off).
 
   Returns:
     a boolean grid, True where the cuts exclude, or None when this
     panel determines no cut variable (or the cut is off).
   """
   obcut = cuts.get("omegabh2_cut")
+  oblo  = cuts.get("omegabh2_lo")
   lo    = cuts.get("omegam2h2_lo")
   hi    = cuts.get("omegam2h2_hi")
   pair  = {rx, ry}
 
-  if pair == {"h0", "ob"} and obcut is not None:
+  if pair == {"h0", "ob"} and (obcut is not None or oblo is not None):
     h0 = xx if rx == "h0" else yy
     ob = yy if rx == "h0" else xx
-    return ob * (h0 / 100.0) ** 2 >= obcut
+    obh2 = ob * (h0 / 100.0) ** 2
+    bad = np.zeros(obh2.shape, dtype=bool)
+    if obcut is not None:
+      bad |= obh2 >= obcut
+    if oblo is not None:
+      bad |= obh2 <= oblo
+    return bad
 
   g2 = None
   if pair == {"h0", "om"}:
@@ -591,8 +611,8 @@ def _lcdm_triangle_fig(source, names, dchi2, cuts=None):
   for n in lcdm:
     cols.append(names.index(n))
 
-  # color = clipped log10 delta-chi2 (saturates at chi2 = 100 so
-  # outliers do not wash out the bulk; see _log_dchi2_color).
+  # color = clipped log10 delta-chi2 (saturated ends so outliers do
+  # not wash out the bulk; see _log_dchi2_color for the band).
   logc = _log_dchi2_color(dchi2)
 
   # derived omega_m h^2 = Omega_m * (H0 / 100)^2, added as its own
@@ -689,7 +709,7 @@ def _pc_label(k, vec, frac, labels):
 
 
 def _lnparam_pca_fig(source, names, color, clabel, title,
-                     fit_target=None):
+                     fit_target=None, vmin=None, vmax=None):
   """
   First two ln-parameter principal components, colored per row.
 
@@ -729,6 +749,9 @@ def _lnparam_pca_fig(source, names, color, clabel, title,
     fit_target = optional (N,) positive per-row values; fits
                  ln(fit_target) on the standardized ln parameters
                  and annotates the fitted monomial + R^2.
+    vmin, vmax = optional pinned colorbar limits; None lets
+                 matplotlib scale to the data (pin the chi2 page to
+                 _CHI2_CBAND so colorbars compare across runs).
 
   Returns:
     the matplotlib Figure, or None.
@@ -803,11 +826,17 @@ def _lnparam_pca_fig(source, names, color, clabel, title,
                + f"  ($R^2$ = {r2:.2f})")
 
   fig, ax = plt.subplots(figsize=(8, 6))
-  sc = ax.scatter(pcs[:, 0],        # x = PC1 projection
-                  pcs[:, 1],        # y = PC2 projection
-                  c=np.asarray(color),
+  # draw dark-to-bright so the rare high-color points sit on top of
+  # the overplotted bulk instead of being buried under it.
+  cvals = np.asarray(color)
+  order = np.argsort(cvals)
+  sc = ax.scatter(pcs[order, 0],    # x = PC1 projection
+                  pcs[order, 1],    # y = PC2 projection
+                  c=cvals[order],
                   cmap="viridis",   # sequential, colorblind-safe
-                  s=4)
+                  s=4,
+                  vmin=vmin,
+                  vmax=vmax)
   # extend arrows: values continue past the clipped color ends.
   fig.colorbar(sc, ax=ax, extend="both", label=clabel)
   ax.set_xlabel(_pc_label(k=1,
@@ -922,7 +951,9 @@ def plot_diagnostics(train_losses,
                           color=_log_dchi2_color(coverage["dchi2"]),
                           clabel=r"$\log_{10}\Delta\chi^2$",
                           title="ln-parameter PCA of the val "
-                                "cosmologies, colored by hardness")
+                                "cosmologies, colored by hardness",
+                          vmin=_CHI2_CBAND[0],
+                          vmax=_CHI2_CBAND[1])
     if f5 is not None:
       figs.append(f5)
     # sparsity color: percentile-clipped so one far outlier does not
@@ -936,7 +967,9 @@ def plot_diagnostics(train_losses,
                                   "nearest train pts (whitened)"),
                           title="ln-parameter PCA, colored by "
                                 "training sparsity",
-                          fit_target=knn)
+                          fit_target=knn,
+                          vmin=lo,
+                          vmax=hi)
     if f6 is not None:
       figs.append(f6)
 

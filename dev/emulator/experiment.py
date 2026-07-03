@@ -95,6 +95,8 @@ class EmulatorExperiment:
                      cosmolike_dataset = .dataset ini naming the cov /
                        mask / data-vector files;
                      omegabh2_cut = drop rows with omega_b h^2 >= this;
+                     omegabh2_lo = optional lower bound on omega_b h^2
+                       (rows at or below it dropped; omit for no cut);
                      omegam2h2_lo / omegam2h2_hi = optional window on
                        omegam^2 h^2 = (Omega_m H0/100)^2; rows outside
                        are dropped (omit a key for no cut on that side);
@@ -275,6 +277,7 @@ class EmulatorExperiment:
       params_path=d["train_params"],
       names=self.names,
       cut=d["omegabh2_cut"],
+      omegabh2_lo=d.get("omegabh2_lo"),
       omegam2h2_lo=d.get("omegam2h2_lo"),
       omegam2h2_hi=d.get("omegam2h2_hi"),
       divisor=(None if n_train is not None else d["train_divisor"]),
@@ -309,6 +312,7 @@ class EmulatorExperiment:
       params_path=d["val_params"],
       names=self.names,
       cut=d["omegabh2_cut"],
+      omegabh2_lo=d.get("omegabh2_lo"),
       omegam2h2_lo=d.get("omegam2h2_lo"),
       omegam2h2_hi=d.get("omegam2h2_hi"),
       divisor=(None if n_val is not None else d["val_divisor"]),
@@ -342,6 +346,7 @@ class EmulatorExperiment:
     # catastrophically-failing corners).
     phys = phys_cut_idx(C=C, idx=idx, names=self.names,
                         cut=d["omegabh2_cut"],
+                        omegabh2_lo=d.get("omegabh2_lo"),
                         omegam2h2_lo=d.get("omegam2h2_lo"),
                         omegam2h2_hi=d.get("omegam2h2_hi"))
     return int(len(phys))
