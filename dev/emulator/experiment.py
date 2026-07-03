@@ -95,6 +95,9 @@ class EmulatorExperiment:
                      cosmolike_dataset = .dataset ini naming the cov /
                        mask / data-vector files;
                      omegabh2_cut = drop rows with omega_b h^2 >= this;
+                     omegam2h2_lo / omegam2h2_hi = optional window on
+                       omegam^2 h^2 = (Omega_m H0/100)^2; rows outside
+                       are dropped (omit a key for no cut on that side);
                      train_divisor / val_divisor = keep N // divisor of
                        train / val rows;
                      split_seed = seed for the cut+shuffle picking train /
@@ -262,15 +265,18 @@ class EmulatorExperiment:
     """
     d   = self.data
     gen = torch.Generator().manual_seed(int(d["split_seed"]))
-    # load_source (data_staging.py): memmap the dv .npy, cut the params
-    # (omega_b h^2 < cut), keep n_keep (or N // divisor) rows of the seeded
-    # shuffle, stage in RAM if they fit (else the memmap), return {C, dv,
-    # idx} (+ C_mean / dv_mean with with_means).
+    # load_source (data_staging.py): memmap the dv .npy, apply the physical
+    # cuts (omega_b h^2 < cut; optional omegam^2 h^2 window), keep n_keep
+    # (or N // divisor) rows of the seeded shuffle, stage in RAM if they
+    # fit (else the memmap), return {C, dv, idx} (+ C_mean / dv_mean with
+    # with_means).
     self.train_set = load_source(
       dv_path=d["train_dv"],
       params_path=d["train_params"],
       names=self.names,
       cut=d["omegabh2_cut"],
+      omegam2h2_lo=d.get("omegam2h2_lo"),
+      omegam2h2_hi=d.get("omegam2h2_hi"),
       divisor=(None if n_train is not None else d["train_divisor"]),
       n_keep=n_train,
       gen=gen,
@@ -303,6 +309,8 @@ class EmulatorExperiment:
       params_path=d["val_params"],
       names=self.names,
       cut=d["omegabh2_cut"],
+      omegam2h2_lo=d.get("omegam2h2_lo"),
+      omegam2h2_hi=d.get("omegam2h2_hi"),
       divisor=(None if n_val is not None else d["val_divisor"]),
       n_keep=n_val,
       gen=gen,
@@ -317,22 +325,25 @@ class EmulatorExperiment:
     of an N_train sweep.
 
     Loads the training parameter file, keeps the modeled columns, applies
-    the omega_b h^2 cut (same cut as stage_train), counts the survivors.
+    the physical cuts (the omega_b h^2 bound and the optional
+    omegam^2 h^2 window, same cuts as stage_train), counts the survivors.
     Order-independent, so no shuffle or staging.
 
     Returns:
-      the number of training rows with omega_b h^2 <
-      data["omegabh2_cut"] (an int).
+      the number of training rows passing the physical cuts (an int).
     """
     d = self.data
     # modeled parameter columns (drop leading weight / lnp and trailing
     # chi2), as load_source does by default.
     C   = np.loadtxt(d["train_params"], dtype="float32")[:, slice(2, -1)]
     idx = np.arange(C.shape[0])
-    # phys_cut_idx (data_staging.py): keep rows with omega_b h^2 =
-    # Omega_b (H0/100)^2 < cut (drops the sparse high-baryon corner).
+    # phys_cut_idx (data_staging.py): keep rows with omega_b h^2 < cut
+    # and omegam^2 h^2 inside the optional window (both rarefied,
+    # catastrophically-failing corners).
     phys = phys_cut_idx(C=C, idx=idx, names=self.names,
-                        cut=d["omegabh2_cut"])
+                        cut=d["omegabh2_cut"],
+                        omegam2h2_lo=d.get("omegam2h2_lo"),
+                        omegam2h2_hi=d.get("omegam2h2_hi"))
     return int(len(phys))
 
   def build_geometry(self, train_set=None):

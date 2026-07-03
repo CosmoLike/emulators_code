@@ -25,6 +25,8 @@ data:
   cosmolike_dataset:  lsst_y1_M1_GGL0.05.dataset
 
   omegabh2_cut:  0.035
+  omegam2h2_lo:  0.015
+  omegam2h2_hi:  0.08
   train_divisor: 10
   val_divisor:   50
   split_seed:    0

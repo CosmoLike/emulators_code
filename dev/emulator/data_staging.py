@@ -5,8 +5,9 @@ data-vector (.npy) dumps into the in-memory "source" dicts the rest of the
 package consumes, never loading the (memmap-sized) dv file whole.
 stream_chunks, stream_stats, and param_stats compute per-column
 normalization stats over selected rows; stage_source materializes a row
-subset in RAM if it fits (else keeps the memmap); phys_cut_idx keeps rows
-with omega_b h^2 < cut; read_param_names reads parameter names off a covmat
+subset in RAM if it fits (else keeps the memmap); phys_cut_idx applies the
+physical cuts (omega_b h^2 below a bound, omegam^2 h^2 inside an optional
+window); read_param_names reads parameter names off a covmat
 header. load_source orchestrates: memmap, cut, size, stage one source into
 a {C, dv, idx, (+means)} dict.
 
@@ -165,30 +166,55 @@ def stage_source(C, dv, idx, ram_frac=0.7):
   return C, dv, idx
 
 
-def phys_cut_idx(C, idx, names, cut):
+def phys_cut_idx(C, idx, names, cut,
+                 omegam2h2_lo=None, omegam2h2_hi=None):
   """
-  Keep only rows below a physical-baryon-density cut:
-  omega_b h^2 = Omega_b * (H0/100)^2 < cut.
+  Keep only rows inside the physical-density cuts.
+
+  Two cuts, each on a derived product a per-parameter scan misses:
+
+    omega_b h^2  = Omega_b * (H0/100)^2          <  cut
+    omegam^2 h^2 = (Omega_m * H0/100)^2   inside (omegam2h2_lo,
+                                                  omegam2h2_hi)
 
   The high-omega_b h^2 cosmologies (a sparse, ~2x Planck corner)
-  fail catastrophically and no real posterior visits them, so
-  they are dropped from both the training data and the metric.
+  fail catastrophically and no real posterior visits them.
+  omegam^2 h^2 is Gamma^2, the transfer-shape parameter squared,
+  and it is the coordinate along the sampling cloud's long axis:
+  both of its tails are rarefied (few training neighbours) and
+  carry the catastrophic failures, so the window keeps the
+  well-covered core around Planck's Gamma^2 ~ 0.045. Either bound
+  may be None (that side is not cut), so old configs without the
+  window keys behave exactly as before.
 
   Arguments:
     C     = full parameter dump, (N, n_param), physical units,
             column order given by `names`.
     idx   = candidate row indices into C (e.g. a shuffle).
     names = parameter column names in C's column order; locate
-            the omegab and H0 columns by name.
+            the omegab, omegam, and H0 columns by name.
     cut   = upper bound on omega_b h^2 (rows >= cut dropped).
+    omegam2h2_lo = optional lower bound on omegam^2 h^2 (rows at
+                   or below it dropped; None = no lower cut).
+    omegam2h2_hi = optional upper bound on omegam^2 h^2 (rows at
+                   or above it dropped; None = no upper cut).
 
   Returns:
-    the subset of idx with omega_b h^2 < cut, in idx's order.
+    the subset of idx passing every given cut, in idx's order.
   """
   i_ob = names.index("omegab")     # baryon density column
   i_h0 = names.index("H0")         # Hubble column (km/s/Mpc)
   obh2 = C[idx, i_ob] * (C[idx, i_h0] / 100.0) ** 2
-  return idx[obh2 < cut]
+  keep = obh2 < cut
+  if omegam2h2_lo is not None or omegam2h2_hi is not None:
+    i_om = names.index("omegam")   # matter density column
+    #   omegam^2 h^2 = (Omega_m * H0/100)^2 = Gamma^2
+    g2 = (C[idx, i_om] * C[idx, i_h0] / 100.0) ** 2
+    if omegam2h2_lo is not None:
+      keep &= g2 > omegam2h2_lo
+    if omegam2h2_hi is not None:
+      keep &= g2 < omegam2h2_hi
+  return idx[keep]
 
 
 def read_param_names(covmat_path, comment="#"):
@@ -213,12 +239,14 @@ def read_param_names(covmat_path, comment="#"):
 
 def load_source(dv_path, params_path, names, cut, divisor=None,
                 gen=None, ram_frac=0.7, with_means=False,
-                param_cols=slice(2, -1), verbose=True, n_keep=None):
+                param_cols=slice(2, -1), verbose=True, n_keep=None,
+                omegam2h2_lo=None, omegam2h2_hi=None):
   """
   Load, physically cut, and stage one dv/param source.
 
   Memmaps the dv dump (never reading it whole), keeps the
-  modeled param columns, applies the omega_b h^2 cut, takes the
+  modeled param columns, applies the physical cuts (omega_b h^2
+  bound + the optional omegam^2 h^2 window), takes the
   first N // divisor cut rows of a fixed shuffle, stages that
   subset, and -- when with_means -- computes the centering means.
   Wraps phys_cut_idx / stage_source / stream_stats / param_stats.
@@ -246,6 +274,11 @@ def load_source(dv_path, params_path, names, cut, divisor=None,
     n_keep      = absolute rows to keep (overrides divisor; for a
                   learning-curve sweep at explicit sizes). Pass
                   this or divisor.
+    omegam2h2_lo = optional lower bound on omegam^2 h^2 (the
+                   Gamma^2 window, see phys_cut_idx; None = no
+                   lower cut).
+    omegam2h2_hi = optional upper bound on omegam^2 h^2 (None =
+                   no upper cut).
 
   Returns:
     a source dict {"C", "dv", "idx"} (plus "C_mean" / "dv_mean"
@@ -268,7 +301,9 @@ def load_source(dv_path, params_path, names, cut, divisor=None,
 
   n     = C.shape[0]
   order = torch.randperm(n, generator=gen).numpy()
-  phys  = phys_cut_idx(C=C, idx=order, names=names, cut=cut)
+  phys  = phys_cut_idx(C=C, idx=order, names=names, cut=cut,
+                       omegam2h2_lo=omegam2h2_lo,
+                       omegam2h2_hi=omegam2h2_hi)
   # rows to keep: an absolute n_keep, or N // divisor.
   keep  = int(n_keep) if n_keep is not None else int(n // divisor)
   if len(phys) < keep:

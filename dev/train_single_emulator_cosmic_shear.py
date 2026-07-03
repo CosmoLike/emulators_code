@@ -36,7 +36,8 @@
 #  hyperparameter (no magic numbers in code). Two blocks:
 #  - `data`: input file names (train_dv, train_params, train_covmat, val_dv,
 #    val_params -- bare filenames, resolved under --root/chains), cut/split
-#    settings (omegabh2_cut, train_divisor, val_divisor, split_seed, ram_frac),
+#    settings (omegabh2_cut, the optional omegam2h2_lo / omegam2h2_hi window
+#    on omegam^2 h^2, train_divisor, val_divisor, split_seed, ram_frac),
 #    cosmolike dataset (cosmolike_data_dir, cosmolike_dataset; resolved under
 #    $ROOTDIR/external_modules/data, not --root).
 #  - `train_args`: knobs (nepochs, bs, loss_mode, silent) plus sub-blocks model
@@ -59,11 +60,12 @@
 #  Omega_m; no tau in the dumps) plus the derived omega_m h^2, every point
 #  colored by its log10 delta-chi2, showing where in parameter space the
 #  emulator fails. Page 5: the val cosmologies on the first two principal
-#  components of the ln parameters (sample-covariance PCA; a PC in ln space
-#  is a product of parameter powers, e.g. As^a H0^b omegam^c, and the axis
-#  labels spell the exponents out), colored the same way; a color gradient
-#  along a PC names the power-law combination the emulator finds hard. Omit
-#  for no figure.
+#  components of the standardized ln parameters (a correlation-matrix PCA:
+#  each ln parameter is centered and scaled to unit variance first, so wide
+#  and narrow priors weigh equally; a PC is still a product of parameter
+#  powers, e.g. As^a H0^b omegam^c, and the axis labels spell the effective
+#  exponents out), colored the same way; a color gradient along a PC names
+#  the power-law combination the emulator finds hard. Omit for no figure.
 #
 #- `--save` (default `emulator`): name root for the trained-emulator files,
 #  written under --root/chains with the run tag appended (like --diagnostic).
@@ -328,6 +330,7 @@ def main():
           "chi2fn; --rescale is on)")
     # val_set + names add page 4: the getdist LCDM triangle of the val
     # cosmologies colored by log10 delta-chi2 (cov["dchi2"], same rows).
+    # cuts shades the physically-removed regions gray on that page.
     plot_diagnostics(train_losses=train_losses,
                      medians=medians,
                      means=means,
@@ -338,6 +341,9 @@ def main():
                      hard_dir=hd,
                      val_set=exp.val_set,
                      names=exp.names,
+                     cuts={"omegabh2_cut": cfg["data"].get("omegabh2_cut"),
+                           "omegam2h2_lo": cfg["data"].get("omegam2h2_lo"),
+                           "omegam2h2_hi": cfg["data"].get("omegam2h2_hi")},
                      savepath=diag_path)
     log(f"saved diagnostics -> {diag_path}")
 

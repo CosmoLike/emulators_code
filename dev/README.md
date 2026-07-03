@@ -114,8 +114,9 @@ chi2  =  r^T Cinv r
 
 **1. Stage the data** (`data_staging.py`). The training set is a large dump of
 `(parameters, data vector)` pairs the physics code wrote to disk. The dump is far
-too big to hold in RAM, so it is memmapped and read in slices; a physical cut
-drops the sparse, unphysical high-`omega_b h^2` corner no real posterior visits,
+too big to hold in RAM, so it is memmapped and read in slices; physical cuts
+drop the sparse corners no real posterior visits (the high-`omega_b h^2`
+corner, and both tails of the `omegam^2 h^2` window when configured),
 and only `N_train` rows are kept. The result is a "source" dict (`C`, `dv`,
 `idx`) the rest of the pipeline consumes.
 
@@ -131,8 +132,9 @@ and only `N_train` rows are kept. The result is a "source" dict (`C`, `dv`,
                            ▼
                  seeded shuffle             randperm(n, gen)   (split_seed)
                            ▼
-                 physical cut               phys_cut_idx: keep omega_b h^2 < cut
-                           ▼                 (omegab, H0 columns found by name)
+                 physical cuts              phys_cut_idx: keep omega_b h^2 < cut
+                           ▼                 + lo < omegam^2 h^2 < hi (optional);
+                           │                 omegab/omegam/H0 columns found by name
                  keep N_train               idx = phys[:n_keep  or  N // divisor]
                            ▼
             stage_source:  subset bytes < ram_frac · available RAM ?
@@ -308,7 +310,7 @@ driver is a thin wrapper that varies one knob:
 
 | File | Role |
 |---|---|
-| `data_staging.py` | On-disk dumps → in-memory "source" dicts; streaming per-column stats; the `omega_b h^2` physical cut. Memmaps the dv dump (never loads it whole). |
+| `data_staging.py` | On-disk dumps → in-memory "source" dicts; streaming per-column stats; the physical cuts (`omega_b h^2` bound, optional `omegam^2 h^2` window). Memmaps the dv dump (never loads it whole). |
 | `geometries_parameter.py` | Input whitening: `ParamGeometry` (center + rotate into the covmat eigenbasis + unit-scale), `LogParamGeometry`, and the IA-factoring `NLAInputGeometry` / `AmplitudeFactorGeometry`. |
 | `geometries_output.py` | Output side: `DataVectorGeometry` (squeeze to unmasked entries, whiten, own the chi2 `Cinv`), `DiagonalGeometry` (theta order, for a CNN), `BlockDiagonalGeometry`, `build_shear_angle_map`. **Only file importing cosmolike.** |
 | `analytics.py` | Closed-form analytic xi (Eisenstein-Hu) to divide out broadband cosmology dependence — the optional rescaling `R`. |
@@ -573,7 +575,7 @@ Turns on-disk dumps into in-memory "source" dicts.
 
 - `load_source(...)` — orchestrator: memmap the dv, load + cut the params, keep `N_train` rows, stage, return `{C, dv, idx (+ means)}`.
 - `stage_source(C, dv, idx, ram_frac)` — materialize the used rows in RAM if they fit, else keep the memmap (reindex local).
-- `phys_cut_idx(C, idx, names, cut)` — keep the rows with `omega_b h^2 < cut`.
+- `phys_cut_idx(C, idx, names, cut, omegam2h2_lo, omegam2h2_hi)` — keep the rows with `omega_b h^2 < cut` and (optionally) `lo < omegam^2 h^2 < hi`.
 - `stream_chunks(idx, chunk)` — yield sorted row-index blocks (sequential disk reads).
 - `stream_stats(mm, idx, method, CHUNK)` — per-column mean/std (or min/max) over the used rows, streamed (never loads the dump whole).
 - `param_stats(arr, idx, method)` — the same stats for the in-RAM parameter array.

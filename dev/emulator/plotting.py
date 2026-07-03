@@ -89,6 +89,30 @@ def _history_panels(ax_loss, ax_frac, train_losses, medians,
   ax_frac.legend(frameon=False, title="delta chi2")
 
 
+def _log_dchi2_color(dchi2, lo=-2.0, hi=2.0):
+  """
+  log10 delta-chi2 clipped to a fixed color band.
+
+  The raw chi2 spans many decades and a handful of catastrophic
+  outliers would set the color scale, washing every ordinary point
+  into one dark shade. Clipping to [lo, hi] (default delta-chi2 in
+  [0.01, 100]) spends the whole colormap on the decision-relevant
+  band around the 0.2 goal; anything beyond saturates at the end
+  color. The floor also guards log10 against a numerically zero
+  chi2.
+
+  Arguments:
+    dchi2 = per-point delta-chi2 values.
+    lo    = lower color bound in log10 (default -2, chi2 = 0.01).
+    hi    = upper color bound in log10 (default +2, chi2 = 100).
+
+  Returns:
+    (N,) clipped log10 values, ready to be a scatter color.
+  """
+  c = np.asarray(dchi2, dtype="float64")
+  return np.clip(np.log10(np.maximum(c, 1e-12)), lo, hi)
+
+
 def _coverage_panels(ax_scatter, ax_hist, knn_dist, dchi2, k_nn):
   """
   Draw the two coverage-diagnostic panels.
@@ -108,20 +132,42 @@ def _coverage_panels(ax_scatter, ax_hist, knn_dist, dchi2, k_nn):
   y   = np.log10(np.maximum(dchi2, 1e-4))
   bad = dchi2 > 0.2
 
-  # (a) hardness vs local sparsity. x = knn_dist, y = color =
-  # log10 dchi2; the dashed line is the 0.2 goal.
-  sc = ax_scatter.scatter(knn_dist, y, s=5, c=y, cmap="viridis")
+  # (a) hardness vs local sparsity. x = knn_dist, y = log10 dchi2
+  # (full range, so outliers stay visible as points); color = the
+  # clipped log10 (saturates at chi2 = 100, so the bulk keeps color
+  # resolution). The dashed line is the 0.2 goal.
+  sc = ax_scatter.scatter(knn_dist, y, s=5,
+                          c=_log_dchi2_color(dchi2),
+                          cmap="viridis")
   ax_scatter.axhline(np.log10(0.2), color="0.4", lw=1, ls="--")
   ax_scatter.set_xlabel(f"mean dist to {k_nn} nearest train pts")
   ax_scatter.set_ylabel(r"$\log_{10}\,\Delta\chi^2$")
-  # ax.figure is the parent figure; add the colorbar to it.
+  # ax.figure is the parent figure; add the colorbar to it. The
+  # extend arrows mark that values continue past the clipped ends.
   ax_scatter.figure.colorbar(sc,
                              ax=ax_scatter,
+                             extend="both",
                              label=r"$\log_{10}\,\Delta\chi^2$")
 
   # (b) good vs bad sparsity. x = knn_dist, y = density; shared
-  # bins so the two histograms are comparable.
-  bins = np.linspace(knn_dist.min(), knn_dist.max(), 40)
+  # bins so the two histograms are comparable. The range clips the
+  # far knn tails (a lone outlier stretches equal-width bins until
+  # the narrow population falls into a single bar), and the bin
+  # width follows the NARROWER population (Freedman-Diaconis per
+  # population, take the smaller), so a tight "good" peak still
+  # shows its shape next to a broad "bad" one.
+  lo = np.percentile(knn_dist, 0.5)
+  hi = np.percentile(knn_dist, 99.5)
+  widths = []
+  for m in (~bad, bad):
+    if m.sum() >= 2:
+      e = np.histogram_bin_edges(knn_dist[m], bins="fd")
+      if len(e) > 1 and e[1] > e[0]:
+        widths.append(e[1] - e[0])
+  width = min(widths) if widths else (hi - lo) / 40.0
+  nbins = int(np.ceil((hi - lo) / max(width, 1e-12)))
+  nbins = min(max(nbins, 20), 150)   # readable floor / ceiling
+  bins = np.linspace(lo, hi, nbins + 1)
   ax_hist.hist(knn_dist[~bad],
                bins=bins,
                density=True,
@@ -382,7 +428,130 @@ def _lcdm_columns(names):
   return kept, labels
 
 
-def _lcdm_triangle_fig(source, names, dchi2):
+# which lowercased dump names play each role in the physical cuts
+# (plus our own derived omegamh2 column); used to find the triangle
+# panels whose two axes determine a cut variable.
+_CUT_ROLES = (
+  ("h0",   ("h0",)),
+  ("ob",   ("omegab", "omega_b")),
+  ("om",   ("omegam", "omega_m")),
+  ("omh2", ("omegamh2",)),
+)
+
+
+def _cut_role(name):
+  """The cut role ("h0" / "ob" / "om" / "omh2") of a column name, or
+  None when the column plays no part in the physical cuts."""
+  low = name.lower()
+  for role, aliases in _CUT_ROLES:
+    if low in aliases:
+      return role
+  return None
+
+
+def _cut_exclusion(rx, ry, xx, yy, cuts):
+  """
+  Boolean mask of the physically-cut region on one triangle panel.
+
+  A cut on a derived product is a sharp 2D region only on a panel
+  whose two axes determine that product:
+
+    omega_b h^2  = Omega_b (H0/100)^2      on the (H0, Omega_b) panel
+    omegam^2 h^2 = (Omega_m H0/100)^2      on (H0, Omega_m),
+                 = Omega_m * (Omega_m h^2) on (Omega_m, omegam h^2),
+                 = (Omega_m h^2)^2/(H0/100)^2 on (H0, omegam h^2).
+
+  Every other panel only thins marginally, so it gets no shading.
+
+  Arguments:
+    rx, ry = cut roles of the panel's x and y axes (see _cut_role).
+    xx, yy = meshgrid of axis values covering the panel.
+    cuts   = mapping with "omegabh2_cut" / "omegam2h2_lo" /
+             "omegam2h2_hi" (any may be None = that cut is off).
+
+  Returns:
+    a boolean grid, True where the cuts exclude, or None when this
+    panel determines no cut variable (or the cut is off).
+  """
+  obcut = cuts.get("omegabh2_cut")
+  lo    = cuts.get("omegam2h2_lo")
+  hi    = cuts.get("omegam2h2_hi")
+  pair  = {rx, ry}
+
+  if pair == {"h0", "ob"} and obcut is not None:
+    h0 = xx if rx == "h0" else yy
+    ob = yy if rx == "h0" else xx
+    return ob * (h0 / 100.0) ** 2 >= obcut
+
+  g2 = None
+  if pair == {"h0", "om"}:
+    h0 = xx if rx == "h0" else yy
+    om = yy if rx == "h0" else xx
+    g2 = (om * h0 / 100.0) ** 2
+  elif pair == {"om", "omh2"}:
+    om   = xx if rx == "om" else yy
+    omh2 = yy if rx == "om" else xx
+    g2 = om * omh2
+  elif pair == {"h0", "omh2"}:
+    h0   = xx if rx == "h0" else yy
+    omh2 = yy if rx == "h0" else xx
+    g2 = omh2 ** 2 / (h0 / 100.0) ** 2
+  if g2 is None or (lo is None and hi is None):
+    return None
+  bad = np.zeros(g2.shape, dtype=bool)
+  if lo is not None:
+    bad |= g2 <= lo
+  if hi is not None:
+    bad |= g2 >= hi
+  return bad
+
+
+def _shade_cuts(g, plot_names, cuts):
+  """
+  Gray out the physically-cut regions on a getdist triangle.
+
+  Walks the lower-triangle panels; where a panel's two axes
+  determine a cut variable (see _cut_exclusion), fills the excluded
+  region light gray under the points, so an empty corner reads as
+  "removed by the cut", not as an emulator failure. Adds one caption
+  line naming the convention.
+
+  Arguments:
+    g          = the getdist subplot plotter (after triangle_plot).
+    plot_names = the plotted column names, in triangle order
+                 (panel [i][j] has x = plot_names[j],
+                 y = plot_names[i]).
+    cuts       = the cut values (see _cut_exclusion).
+  """
+  n = len(plot_names)
+  for i in range(1, n):
+    for j in range(i):
+      ax = g.subplots[i][j]
+      if ax is None:
+        continue
+      rx = _cut_role(plot_names[j])
+      ry = _cut_role(plot_names[i])
+      if rx is None or ry is None:
+        continue
+      xs = np.linspace(ax.get_xlim()[0], ax.get_xlim()[1], 200)
+      ys = np.linspace(ax.get_ylim()[0], ax.get_ylim()[1], 200)
+      xx, yy = np.meshgrid(xs, ys)
+      bad = _cut_exclusion(rx=rx, ry=ry, xx=xx, yy=yy, cuts=cuts)
+      if bad is None or not bad.any():
+        continue
+      # zorder 0 renders the fill under the already-drawn points;
+      # the [0.5, 1.5] level band selects exactly the True cells.
+      ax.contourf(xx, yy, bad.astype(float),
+                  levels=[0.5, 1.5], colors=["0.88"], zorder=0)
+      # contourf can widen the limits; pin them back to the data's.
+      ax.set_xlim(xs[0], xs[-1])
+      ax.set_ylim(ys[0], ys[-1])
+  g.fig.text(0.99, 0.99,
+             "gray: region removed by the physical cuts",
+             ha="right", va="top", fontsize=9, color="0.35")
+
+
+def _lcdm_triangle_fig(source, names, dchi2, cuts=None):
   """
   getdist triangle of a source's LCDM parameters, colored by chi2.
 
@@ -401,6 +570,11 @@ def _lcdm_triangle_fig(source, names, dchi2):
     names  = parameter column names, in the dump's column order.
     dchi2  = (N,) per-row delta-chi2, sorted-idx order (as returned
              by coverage_diagnostic / eval_source_chi2).
+    cuts   = optional mapping with the physical-cut values
+             ("omegabh2_cut" / "omegam2h2_lo" / "omegam2h2_hi");
+             when given, the excluded regions are shaded gray on the
+             panels that determine them (see _shade_cuts), so an
+             empty corner is not mistaken for an emulator failure.
 
   Returns:
     the matplotlib Figure of the triangle, or None.
@@ -416,10 +590,9 @@ def _lcdm_triangle_fig(source, names, dchi2):
   for n in lcdm:
     cols.append(names.index(n))
 
-  # color = log10 delta-chi2 (it spans decades); the floor guards
-  # log10 against a numerically zero chi2.
-  c = np.asarray(dchi2, dtype="float64")
-  logc = np.log10(np.maximum(c, 1e-12))
+  # color = clipped log10 delta-chi2 (saturates at chi2 = 100 so
+  # outliers do not wash out the bulk; see _log_dchi2_color).
+  logc = _log_dchi2_color(dchi2)
 
   # derived omega_m h^2 = Omega_m * (H0 / 100)^2, added as its own
   # triangle axis when both parents are among the matched columns
@@ -460,6 +633,10 @@ def _lcdm_triangle_fig(source, names, dchi2):
   g.triangle_plot(samples,
                   plot_names,
                   plot_3d_with_param="logdchi2")
+  # shade the physically-cut regions so their emptiness reads as
+  # "removed by the cut", not as a failure of the emulator.
+  if cuts:
+    _shade_cuts(g=g, plot_names=plot_names, cuts=cuts)
   return g.fig
 
 
@@ -467,7 +644,8 @@ def _pc_label(k, vec, frac, labels):
   """
   Axis label for one ln-parameter principal component.
 
-  A direction v in ln-parameter space is the monomial
+  A direction with exponent vector v in ln-parameter space is the
+  monomial
     exp(PC) = prod_i p_i^(v_i)
   so the label spells the component out as a product of parameter
   powers, exponents sorted by size and rescaled so the largest is 1
@@ -476,8 +654,11 @@ def _pc_label(k, vec, frac, labels):
 
   Arguments:
     k      = component number (1-based, the "PC1" prefix).
-    vec    = (n_params,) eigenvector of the ln-parameter covariance.
-    frac   = this component's share of the total ln-variance.
+    vec    = (n_params,) monomial exponents of the component (for a
+             standardized PCA, eigenvector over the per-parameter
+             sigma).
+    frac   = this component's share of the total (standardized)
+             ln-variance.
     labels = LaTeX labels of the parameters (no surrounding $).
 
   Returns:
@@ -497,18 +678,23 @@ def _lnparam_pca_fig(source, names, dchi2):
   """
   First two ln-parameter principal components, colored by chi2.
 
-  Computes the sample covariance of the ln of the LCDM parameters
-  over the source's used rows and eigendecomposes it (a PCA). In ln
-  space a principal direction is a product of parameter powers,
-    exp(PC) = As^a * ns^b * H0^c * ...,
-  the natural family of physical degeneracy directions (omega_m h^2
-  is one such monomial, so the base columns already span it; the
-  derived column stays out, keeping the covariance non-singular).
-  The figure scatters the rows on the first two components, colored
-  by log10 delta-chi2: a color gradient along a PC names the
-  power-law combination the emulator finds hard. Returns None when
-  fewer than two LCDM columns are recognized, or when a parameter is
-  not strictly positive (ln undefined).
+  Each ln parameter is centered and scaled to unit variance, and the
+  PCA eigendecomposes their sample correlation matrix. The
+  standardization is essential: the raw ln variances differ wildly
+  (the As prior spans a factor of ten, ns a few percent), so a
+  covariance PCA reads back the per-parameter prior widths (PC1 =
+  pure As) instead of any correlated combination. On standardized
+  variables a component PC = sum_i w_i (ln p_i - mu_i) / sigma_i is
+  still a product of parameter powers,
+    exp(PC) proportional to  As^(w_As/sigma_As) * ns^(w_ns/sigma_ns) * ...,
+  so the axis labels report the effective exponents w_i / sigma_i
+  (omega_m h^2 is one such monomial, so the base columns already
+  span it; the derived column stays out, keeping the matrix
+  non-singular). The figure scatters the rows on the first two
+  components, colored by log10 delta-chi2: a color gradient along a
+  PC names the power-law combination the emulator finds hard.
+  Returns None when fewer than two LCDM columns are recognized, or
+  when a parameter is not strictly positive (ln undefined).
 
   Arguments:
     source = source dict with "C" (param dump) and "idx" (used rows).
@@ -533,10 +719,17 @@ def _lnparam_pca_fig(source, names, dchi2):
   if np.any(V <= 0.0):
     return None
 
-  # center the ln parameters and take their sample covariance.
-  L = np.log(V)
-  X = L - L.mean(axis=0)
-  S = np.cov(X, rowvar=False)
+  # center each ln parameter and scale it to unit variance (the
+  # per-parameter normalization: subtracting the mean is the
+  # ln-space form of dividing by a central value; dividing by sigma
+  # puts wide and narrow priors on the same footing).
+  L   = np.log(V)
+  X   = L - L.mean(axis=0)
+  sig = X.std(axis=0)
+  Z   = X / sig
+  # sample correlation matrix of the ln parameters (the covariance
+  # of the standardized variables).
+  S = np.cov(Z, rowvar=False)
 
   # eigh returns ascending eigenvalues; flip to descending so
   # column j of evecs is the j-th principal direction.
@@ -545,20 +738,29 @@ def _lnparam_pca_fig(source, names, dchi2):
   evals = evals[order]
   evecs = evecs[:, order]
 
-  # deterministic sign: make the largest-|weight| exponent positive
-  # (an eigenvector's sign is arbitrary; this fixes the label).
-  for j in range(2):
-    imax = np.argmax(np.abs(evecs[:, j]))
-    if evecs[imax, j] < 0.0:
-      evecs[:, j] = -evecs[:, j]
+  # effective monomial exponents: PC = sum_i w_i (ln p_i - mu)/sig_i
+  # means exp(PC) carries p_i to the power w_i / sig_i. One column
+  # per plotted component. The [:, None] adds a size-1 axis so sig
+  # ((k,)) divides each column of evecs ((k, 2)) elementwise.
+  expo = evecs[:, :2] / sig[:, None]
 
-  # project the centered ln parameters on the first two directions.
-  pcs  = X @ evecs[:, :2]
+  # deterministic sign: make the largest-|exponent| positive (an
+  # eigenvector's sign is arbitrary; this fixes the label). Flip the
+  # eigenvector and its exponents together so points and label match.
+  for j in range(2):
+    imax = np.argmax(np.abs(expo[:, j]))
+    if expo[imax, j] < 0.0:
+      evecs[:, j] = -evecs[:, j]
+      expo[:, j]  = -expo[:, j]
+
+  # project the standardized ln parameters on the first two
+  # directions.
+  pcs  = Z @ evecs[:, :2]
   frac = evals / evals.sum()
 
-  # color = log10 delta-chi2, floored against a numerically zero chi2.
-  c = np.asarray(dchi2, dtype="float64")
-  logc = np.log10(np.maximum(c, 1e-12))
+  # color = clipped log10 delta-chi2 (saturates at chi2 = 100 so
+  # outliers do not wash out the bulk; see _log_dchi2_color).
+  logc = _log_dchi2_color(dchi2)
 
   fig, ax = plt.subplots(figsize=(8, 6))
   sc = ax.scatter(pcs[:, 0],        # x = PC1 projection
@@ -566,13 +768,15 @@ def _lnparam_pca_fig(source, names, dchi2):
                   c=logc,
                   cmap="viridis",   # sequential, colorblind-safe
                   s=4)
-  fig.colorbar(sc, ax=ax, label=r"$\log_{10}\Delta\chi^2$")
+  # extend arrows: values continue past the clipped color ends.
+  fig.colorbar(sc, ax=ax, extend="both",
+               label=r"$\log_{10}\Delta\chi^2$")
   ax.set_xlabel(_pc_label(k=1,
-                          vec=evecs[:, 0],
+                          vec=expo[:, 0],
                           frac=frac[0],
                           labels=labels))
   ax.set_ylabel(_pc_label(k=2,
-                          vec=evecs[:, 1],
+                          vec=expo[:, 1],
                           frac=frac[1],
                           labels=labels))
   ax.set_title("ln-parameter PCA of the val cosmologies")
@@ -590,6 +794,7 @@ def plot_diagnostics(train_losses,
                      hard_dir=None,
                      val_set=None,
                      names=None,
+                     cuts=None,
                      savepath=None):
   """
   All available diagnostics as a single multipage figure / PDF.
@@ -620,6 +825,10 @@ def plot_diagnostics(train_losses,
     val_set  = the validation source dict ("C" / "idx"), or None;
                its rows must be the ones coverage's dchi2 scored.
     names    = parameter column names in the dump's order, or None.
+    cuts     = optional physical-cut values ("omegabh2_cut" /
+               "omegam2h2_lo" / "omegam2h2_hi") to shade gray on the
+               triangle page (empty cut regions then read as removed,
+               not as failures).
     savepath = if given, write a (multipage) PDF there and close;
                if None, show each page interactively.
   """
@@ -653,7 +862,8 @@ def plot_diagnostics(train_losses,
   if val_set is not None and names is not None:
     f4 = _lcdm_triangle_fig(source=val_set,
                             names=names,
-                            dchi2=coverage["dchi2"])
+                            dchi2=coverage["dchi2"],
+                            cuts=cuts)
     if f4 is not None:
       figs.append(f4)
     f5 = _lnparam_pca_fig(source=val_set,
