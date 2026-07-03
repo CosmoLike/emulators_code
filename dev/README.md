@@ -399,7 +399,7 @@ D=external_modules/code/emulators/emultrf/dev
 # one run
 python $D/train_single_emulator_cosmic_shear.py \
   --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
-  --yaml train_single_emulator_cosmic_shear.yaml --diagnostic out.pdf
+  --yaml train_single_emulator_cosmic_shear.yaml --diagnostic diagnostic
 
 # N_train learning curve across all GPUs
 python $D/sweep_ntrain_emulator_cosmic_shear.py \

@@ -13,7 +13,7 @@
 #       --root projects/lsst_y1/ \
 #       --fileroot emulators/training_scripts/ \
 #       --yaml train_single_emulator_cosmic_shear.yaml \
-#       --diagnostic diagnostic.pdf
+#       --diagnostic diagnostic
 #
 #- Cocoa layout: export $ROOTDIR, then --root names the project folder under it
 #  ($ROOTDIR/projects/lsst_y1) and --fileroot a subfolder of it holding this
@@ -47,9 +47,10 @@
 #
 #- `--diagnostic` (optional): the name root of a multipage diagnostics PDF,
 #  saved under --root/chains (an absolute path keeps its folder). The driver
-#  appends the run's identity, so `--diagnostic diagnostic.pdf` writes e.g.
+#  appends the run's identity, so `--diagnostic diagnostic` writes e.g.
 #  diagnostic_resmlp_t256_ntrain250000.pdf (model name, training temperature
-#  from the train-dv's _cs_<T> tag, staged N_train). Page 1
+#  from the train-dv's _cs_<T> tag, staged N_train; a given extension is
+#  kept, .pdf is the default). Page 1
 #  (2x2): training history + coverage (do failures sit in sparse training
 #  regions?). Page 2: local-linear data-only floor (model vs floor delta-chi2;
 #  plain chi2fn only, skipped under --rescale). Page 3: hard-direction regression
@@ -165,7 +166,7 @@ def main():
                       help="if set, save a multipage diagnostics PDF "
                            "under --root/chains; this is the name "
                            "root, and the run identity is appended "
-                           "(diagnostic.pdf -> diagnostic_resmlp_"
+                           "(diagnostic -> diagnostic_resmlp_"
                            "t256_ntrain250000.pdf)",
                       type=str,
                       default=None)
@@ -274,7 +275,7 @@ def main():
   if args.diagnostic is not None:
     # --diagnostic is a name root: the run tag is appended so runs do
     # not overwrite each other and the file says what produced it,
-    #   diagnostic.pdf -> diagnostic_resmlp_t256_ntrain250000.pdf
+    #   diagnostic -> diagnostic_resmlp_t256_ntrain250000.pdf
     stem, ext = os.path.splitext(args.diagnostic)
     diag_name = f"{stem}_{run_tag(cfg, exp)}{ext or '.pdf'}"
     diag_path = cocoa_output(chains, diag_name)
