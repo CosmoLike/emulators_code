@@ -388,12 +388,19 @@ class AmplitudeFactorGeometry:
     """
     self.pg_keep = pg_keep
     self.n_param = n_param
-    self.n_amps  = len(amp_idx)
+    # normalize to plain ints first: amp_idx arrives as a list from
+    # the classmethods but as a saved tensor from from_state, and set
+    # membership on tensor elements is identity-based (hash, not
+    # value), which would silently keep every column below.
+    idx_list = []
+    for a in amp_idx:
+      idx_list.append(int(a))
+    self.n_amps  = len(idx_list)
     # amplitude columns, in coeff_fn order (appended as-is).
-    self.amp_idx = torch.tensor(amp_idx, dtype=torch.long,
+    self.amp_idx = torch.tensor(idx_list, dtype=torch.long,
                                 device=device)
     # keep = every non-amplitude column, in original order.
-    amp_set = set(amp_idx)
+    amp_set = set(idx_list)
     keep = []
     for j in range(n_param):
       if j not in amp_set:
@@ -450,6 +457,26 @@ class AmplitudeFactorGeometry:
                             cen, V, np.sqrt(lam))
 
     return cls(device=device, pg_keep=pg_keep, amp_idx=amp_idx, n_param=len(names))
+
+  @classmethod
+  def from_state(cls, device, state):
+    """Rebuild from a saved state dict (inference path).
+
+    state's keys match __init__ (the nested "pg_keep" dict rebuilds
+    through ParamGeometry.from_state), so no covmat reread.
+    """
+    return cls(device=device,
+               pg_keep=ParamGeometry.from_state(device,
+                                                state["pg_keep"]),
+               amp_idx=state["amp_idx"],
+               n_param=state["n_param"])
+
+  def state(self):
+    """Tensors to save; keys match __init__ (pg_keep nests the
+    kept-column ParamGeometry's own state)."""
+    return {"pg_keep": self.pg_keep.state(),
+            "amp_idx": self.amp_idx.cpu(),
+            "n_param": self.n_param}
 
   def encode(self, theta):
     """Raw parameters -> model input with amplitudes carried.

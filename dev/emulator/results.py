@@ -143,23 +143,35 @@ def save_emulator(path_root,
   # --- <root>.h5: geometries + histories + config + identity ---
   h5_path = path_root + ".h5"
   str_dt  = h5py.string_dtype(encoding="utf-8")
-  with h5py.File(h5_path, "w") as f:
-    # input whitening, keys exactly ParamGeometry.state().
-    pg = f.create_group("param_geometry")
-    ps = param_geometry.state()
-    pg.create_dataset("names",
-                      data=np.asarray(ps["names"], dtype=object),
-                      dtype=str_dt)
-    for key in ("center", "evecs", "sqrt_ev"):
-      pg.create_dataset(key, data=ps[key].numpy())
 
-    # output geometry, keys exactly DataVectorGeometry.state().
-    dg = f.create_group("dv_geometry")
-    ds = geometry.state()
-    dg.attrs["total_size"] = int(ds["total_size"])
-    dg.attrs["dtype"]      = str(ds["dtype"])
-    for key in ("dest_idx", "evecs", "sqrt_ev", "Cinv", "center"):
-      dg.create_dataset(key, data=ds[key].numpy())
+  def write_state(group, state):
+    # Write one geometry state() dict recursively, so ANY geometry
+    # saves without per-class code: tensors -> datasets, name lists
+    # -> string datasets, nested dicts (a composed geometry, e.g.
+    # AmplitudeFactorGeometry's pg_keep) -> subgroups, scalars and
+    # dtypes -> attributes. Keys stay exactly state()'s, so the
+    # matching from_state rebuilds from a read-back dict.
+    for k, v in state.items():
+      if isinstance(v, dict):
+        write_state(group.create_group(k), v)
+      elif torch.is_tensor(v):
+        group.create_dataset(k, data=v.cpu().numpy())
+      elif isinstance(v, list):
+        group.create_dataset(k,
+                             data=np.asarray(v, dtype=object),
+                             dtype=str_dt)
+      elif isinstance(v, (int, float)):
+        group.attrs[k] = v
+      else:
+        group.attrs[k] = str(v)   # torch.dtype and friends
+
+  with h5py.File(h5_path, "w") as f:
+    # input whitening, keys exactly param_geometry.state().
+    write_state(f.create_group("param_geometry"),
+                param_geometry.state())
+
+    # output geometry, keys exactly geometry.state().
+    write_state(f.create_group("dv_geometry"), geometry.state())
 
     # per-epoch histories; fracs stack to (nepochs, n_thresholds).
     hg = f.create_group("history")
