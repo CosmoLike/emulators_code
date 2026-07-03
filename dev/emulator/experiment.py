@@ -30,9 +30,11 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 
 from .data_staging import read_param_names, load_source, phys_cut_idx
-from .geometries_parameter import ParamGeometry
+from .geometries_parameter import ParamGeometry, AmplitudeFactorGeometry
 from .loss_functions import make_chi2
 from .emulator_designs import ResMLP, ResCNN
+from .IA.emulator_designs import TemplateMLP
+from .IA.loss_functions import TemplateFactoredChi2, nla_coeffs
 from .activations import make_activation
 from .training import (
   run_emulator, build_run_specs, pick_device, make_logger,
@@ -41,8 +43,20 @@ from .training import (
 
 # model name (train_args.model.name) -> class, shared by the drivers.
 # ResCNN also needs the data geometry injected (it builds fixed full<->theta
-# basis-change buffers from it); ResMLP takes no geom.
-MODELS = {"resmlp": ResMLP, "rescnn": ResCNN}
+# basis-change buffers from it); ResMLP takes no geom. "nla" is the
+# factored intrinsic-alignment design: TemplateMLP emits three templates
+# from the non-amplitude inputs and the loss combines them in closed form
+# as K0 + A1*K1 + A1^2*K2, so the amplitude never enters the network
+# (exact generalization in A1; build_geometry swaps the input geometry
+# and the loss together).
+MODELS = {"resmlp": ResMLP, "rescnn": ResCNN, "nla": TemplateMLP}
+
+# the amplitude column the NLA design factors out of the network input.
+# LSST_A1_1 is the NLA amplitude (enters xi as a linear field
+# coefficient, so it factors exactly); LSST_A1_2 is the redshift-
+# evolution power eta, which sits inside the projection integral and
+# stays an emulated input.
+NLA_AMP_NAMES = ["LSST_A1_1"]
 
 # default reported delta-chi2 cutoffs; the first (0.2) is the emulator goal
 # and the best-model-selection metric.
@@ -374,13 +388,29 @@ class EmulatorExperiment:
     # importable for the config logic without cosmolike.
     from .geometries_output import DataVectorGeometry
 
-    # ParamGeometry.from_covmat (geometries_parameter.py): the input
-    # whitening -- eigendecompose the parameter covmat so encode() centers,
-    # rotates, unit-scales the params the model sees.
-    self.pgeom = ParamGeometry.from_covmat(
-      device=self.device,
-      center=train_set["C_mean"],
-      covmat_path=d["train_covmat"])
+    # The input whitening. The plain designs whiten every parameter
+    # (ParamGeometry); the factored NLA design instead whitens only the
+    # non-amplitude columns and appends the raw amplitude last
+    # (AmplitudeFactorGeometry), so the model can drop it and the loss can
+    # read it -- the amplitude never enters the network.
+    if self.model_cls is TemplateMLP:
+      if self.rescale != "none":
+        raise ValueError(
+          "model 'nla' does not compose with --rescale (the factored "
+          "loss owns the target construction)")
+      self.pgeom = AmplitudeFactorGeometry.from_covmat(
+        device=self.device,
+        center=train_set["C_mean"],
+        covmat_path=d["train_covmat"],
+        amp_names=NLA_AMP_NAMES)
+    else:
+      # ParamGeometry.from_covmat (geometries_parameter.py): eigendecompose
+      # the parameter covmat so encode() centers, rotates, unit-scales the
+      # params the model sees.
+      self.pgeom = ParamGeometry.from_covmat(
+        device=self.device,
+        center=train_set["C_mean"],
+        covmat_path=d["train_covmat"])
 
     # DataVectorGeometry.from_cosmolike (geometries_output.py): the output
     # geometry -- read cosmolike's cov / mask / inverse-cov, eigendecompose
@@ -391,6 +421,16 @@ class EmulatorExperiment:
       data_dir=d["cosmolike_data_dir"],
       dataset=d["cosmolike_dataset"],
       probe=self.probe)
+
+    # The loss. The factored NLA design combines the model's three
+    # templates in closed form, xi = K0 + A1*K1 + A1^2*K2 (nla_coeffs),
+    # reading each sample's own A1 off the encoded input's last column,
+    # then scores the plain chi2 on the combined xi.
+    if self.model_cls is TemplateMLP:
+      self.chi2fn = TemplateFactoredChi2(geom=self.geom,
+                                         coeff_fn=nla_coeffs,
+                                         n_amps=len(NLA_AMP_NAMES))
+      return self.pgeom, self.geom, self.chi2fn
 
     # make_chi2 (loss_functions.py): wrap geom in the loss -- plain
     # CosmolikeChi2, or the analytic-R RescaledChi2 / ResidualBaseChi2 when
@@ -458,6 +498,14 @@ class EmulatorExperiment:
     # ResCNN.
     if self.model_cls is ResCNN:
       specs["model_opts"]["geom"] = self.geom
+
+    # TemplateMLP (IA/emulator_designs.py) needs the factored-design
+    # shape: how many amplitude columns AmplitudeFactorGeometry appended
+    # (dropped from the trunk input) and how many templates to emit (3
+    # for NLA: GG, GI, II). setdefault keeps YAML-set overrides.
+    if self.model_cls is TemplateMLP:
+      specs["model_opts"].setdefault("n_amps", len(NLA_AMP_NAMES))
+      specs["model_opts"].setdefault("n_templates", 3)
 
     return specs
 

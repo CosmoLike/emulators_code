@@ -5,6 +5,29 @@ import torch
 from ..loss_functions import CosmolikeChi2
 
 
+def nla_coeffs(amps):
+  """NLA amplitude polynomial coefficients.
+
+  The NLA intrinsic-alignment field is linear in the one amplitude
+  A1, so xi is exactly a quadratic in it: GG (no IA) + GI (linear
+  in the field) + II (quadratic). The 3 templates, in this order
+  (the model and loss must agree), are [GG, GI, II]; template 0
+  (GG, coefficient 1) also carries the training center.
+
+  Arguments:
+    amps = (B, 1) physical amplitude [A1] per sample.
+
+  Returns:
+    (B, 3): the coefficients [1, A1, A1^2].
+  """
+  a1 = amps[:, 0:1]
+  return torch.cat([
+    torch.ones_like(a1),                      # GG
+    a1,                                       # GI
+    a1 * a1,                                  # II
+  ], dim=1)                                   # (B, 3)
+
+
 def tatt_coeffs(amps):
   """TATT amplitude polynomial coefficients.
 
