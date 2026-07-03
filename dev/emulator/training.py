@@ -19,6 +19,8 @@ variance, decorrelating the components (the form the model sees, input and
 target).
 """
 
+import time
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -627,7 +629,15 @@ def training_loop_batched(nepochs,
   # 1.0. Feeds the loss as focus_scale.
   kappa = focus_opts.get("kappa", 1.0)
 
+  # wall-clock timing for GPU comparison. eval_val's .item() below
+  # syncs the GPU before each epoch's log line, so perf_counter around
+  # the epoch measures real elapsed time. epoch 1 carries the one-time
+  # torch.compile warmup, reported apart from the steady-state rate.
+  t_run   = time.perf_counter()
+  t_first = 0.0
+
   for epoch in range(1, nepochs + 1):
+    t_epoch = time.perf_counter()
     model.train()
     perm = tidx[torch.randperm(ntrain).numpy()]
 
@@ -743,6 +753,12 @@ def training_loop_batched(nepochs,
       else:
         scheduler.step()
 
+    # per-epoch wall time; the GPU is already synced by eval_val
+    # above, so this is real elapsed time (train + val).
+    dt = time.perf_counter() - t_epoch
+    if epoch == 1:
+      t_first = dt
+
     if not silent:
       lr_now = optimizer.param_groups[0]["lr"]
       pairs = []
@@ -752,13 +768,26 @@ def training_loop_batched(nepochs,
       print(f"epoch {epoch:3d}  lr {lr_now:.2e}"
             f"  train {train_loss:.4f}"
             f"  val {mean:.4f}  med {median:.4f}"
-            f"  frac>[{fr}]")
+            f"  frac>[{fr}]  {dt:5.1f}s")
 
   if best_state is not None:
     model.load_state_dict(best_state)
     if not silent:
       print(f"best epoch {best_epoch}: "
             f"frac>0.2 {best_frac:.4f}")
+
+  if not silent:
+    # total wall time and the steady-state per-epoch rate (epochs
+    # 2..N, dropping epoch 1's compile warmup) -- the numbers to
+    # compare GPUs by.
+    total = time.perf_counter() - t_run
+    if nepochs > 1:
+      steady = (total - t_first) / (nepochs - 1)
+      print(f"training done: {nepochs} epochs in {total:.1f}s "
+            f"(steady {steady:.2f}s/epoch; epoch 1 {t_first:.1f}s "
+            f"incl. compile)")
+    else:
+      print(f"training done: 1 epoch in {total:.1f}s")
   return train_losses, medians, means, fracs
 
 
