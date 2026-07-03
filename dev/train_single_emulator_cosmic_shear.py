@@ -237,7 +237,24 @@ def main():
                                        quiet=args.quiet)
   # the experiment's quiet-gated logger, reused below
   log = exp.log
-  log(f"device: {exp.device}  |  rescale: {exp.rescale}")
+  # Announce the full design before anything trains, so a stale YAML is
+  # caught here and not 17 minutes later: the resolved model block (name +
+  # every kwarg), the run knobs, and the physical cuts.
+  ta = exp.train_args
+  d  = cfg["data"]
+  log(f"device: {exp.device}  |  model: {exp.model_cls.__name__}  |  "
+      f"activation: {exp.activation}  |  rescale: {exp.rescale}")
+  log(f"model spec: {ta['model']}")
+  log(f"run: nepochs {ta['nepochs']}  bs {ta['bs']}  "
+      f"loss_mode {ta.get('loss_mode', 'sqrt')}")
+  # the remaining train_args sub-blocks, one dict per line (optimizer /
+  # lr / scheduler / trim / focus), so the whole resolved config is on
+  # the terminal.
+  for block in ("optimizer", "lr", "scheduler", "trim", "focus"):
+    if block in ta:
+      log(f"{block}: {ta[block]}")
+  log(f"cuts: omegabh2 in ({d.get('omegabh2_lo')}, {d['omegabh2_cut']})  "
+      f"omegam2h2 in ({d.get('omegam2h2_lo')}, {d.get('omegam2h2_hi')})")
   log("loading sources:")
   (model, train_losses, medians,
    means, fracs) = exp.run()
