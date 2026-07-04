@@ -118,6 +118,17 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**TRUNK-VS-HEAD PARAM PRINT (2026-07-04o, user request).** Below the
+"trainable parameters: N (M excluding pure linear transformations)"
+banner line, run_emulator now prints "  trunk X vs head Y (excluding
+pure linear transformations)" -- both numbers in the
+excluding-linear convention, X + Y == M exactly. Trunk found by the
+duck-type convention .mlp (ResCNN/ResTRF) else .model (ResMLP +
+factored trunks); head = the complement (convs / TRF blocks /
+gates); line omitted for pure trunks (nothing to split).
+test_param_split.py (5 checks: reconciliation + manual counts + the
+no-head case).
+
 **KERNEL RESCALING FLAG (2026-07-04n; user: "kernel_size number =
 the optimal one for 1 block, and another flag that when set
 rescales it when I increase the number of CNN blocks").** New

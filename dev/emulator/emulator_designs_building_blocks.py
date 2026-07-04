@@ -133,11 +133,47 @@ def rescale_kernel_size(kernel_size, n_blocks_cnn):
 
     RF = n * (k_n - 1) + 1
 
-  (each extra layer widens the window an output position sees by
-  k_n - 1). Without rescaling, deepening the stack over-grows the
-  view (3 blocks of k = 11 see RF = 31, wider than a whole
-  26-point bin). This helper instead solves RF >= kernel_size for
-  the smallest odd k_n (same-padding needs odd):
+  Why: write r = (k_n - 1)/2 for the kernel radius (odd kernel,
+  same-padded). One conv's output at position p is a weighted sum
+  of the k_n inputs p-r .. p+r -- one layer sees k_n positions.
+  Stack a second conv: its output at p reads the k_n layer-1
+  positions p-r .. p+r, and each of those sees its own k_n-wide
+  input window. Consecutive layer-1 positions hold windows shifted
+  by exactly one column (stride 1), so the union of the k_n
+  windows is one contiguous window, k_n - 1 columns wider than
+  each. Drawn at k_n = 3 (r = 1):
+
+    y[p]                          layer-2 output: taps
+     │         │         │        h[p-1], h[p], h[p+1]
+    h[p-1]    h[p]     h[p+1]     layer 1: three k_n-wide input
+     │         │         │        windows, each shifted by one
+     ▼         ▼         ▼        column
+    x[p-2..p] x[p-1..p+1] x[p..p+2]
+                                  union = x[p-2 .. p+2]:
+                                  5 = 2*(k_n - 1) + 1 positions
+
+  Every extra layer therefore adds the same r of reach per side --
+  the new kernel's outermost tap already sits r columns out, and
+  looks through a window extending r further. The growth is
+  additive, never multiplicative:
+
+    RF_1 = k_n;   RF_(i+1) = RF_i + (k_n - 1)
+    =>  RF_n = k_n + (n - 1)(k_n - 1) = n*(k_n - 1) + 1
+
+               y[p]               layer n
+              ╱    ╲
+          ..........              the cone widens by r per side,
+         ╱          ╲             per layer
+    x[p - n*r] .. x[p + n*r]      input window = 2*n*r + 1
+                                               = n*(k_n - 1) + 1
+
+  (Same-padding does not change the count: where the cone hangs
+  past the signal's edge it reads padded zeros, not extra data.)
+
+  Without rescaling, deepening the stack over-grows the view (3
+  blocks of k = 11, r = 5, reach 3*5 = 15 per side: RF = 31, wider
+  than a whole 26-point bin). This helper instead solves RF >=
+  kernel_size for the smallest odd k_n (same-padding needs odd):
 
     k_n = ceil((kernel_size - 1) / n_blocks_cnn) + 1, then odd-up.
 

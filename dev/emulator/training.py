@@ -1122,6 +1122,36 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
           f"({n_total - n_linear:,} excluding pure linear "
           f"transformations)")
 
+    # trunk vs head split, both excluding the pure linear
+    # transformations (same convention as above). The trunk is the
+    # ResMLP layer stack: at .mlp on the correction models (ResCNN
+    # / ResTRF) and at .model on ResMLP and the factored trunks
+    # (TemplateMLP / TemplateResCNN / TemplateResTRF); getattr
+    # reaches through a torch.compile wrapper. Everything outside
+    # it -- convs, TRF blocks, gates -- is the head; printed only
+    # when a head exists (a pure trunk has nothing to split).
+    trunk = getattr(model, "mlp", None)
+    if trunk is None:
+      trunk = getattr(model, "model", None)
+    if trunk is not None:
+      t_total  = 0
+      t_linear = 0
+      for p in trunk.parameters():
+        if p.requires_grad:
+          t_total += p.numel()
+      for mod in trunk.modules():
+        if isinstance(mod, nn.Sequential):
+          for child in mod:
+            if isinstance(child, (nn.Linear, Affine)):
+              for p in child.parameters():
+                t_linear += p.numel()
+      if n_total > t_total:
+        # head = the complement of the trunk, in both counts.
+        head_ex = (n_total - t_total) - (n_linear - t_linear)
+        print(f"  trunk {t_total - t_linear:,} vs head "
+              f"{head_ex:,} (excluding pure linear "
+              f"transformations)")
+
   # two-phase capability check, now that the model exists.
   # set_train_phase is a duck-typed model capability (TemplateResCNN);
   # hasattr reaches through a torch.compile wrapper, which forwards
