@@ -38,7 +38,7 @@ import torch.nn as nn
 
 from .activations import activation_fcn
 from .emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock, rescale_kernel_size)
+  Affine, ResBlock, TRFBlock, FiLMGenerator, rescale_kernel_size)
 
 
 class ResMLP(nn.Module):
@@ -152,7 +152,7 @@ class ResCNN(nn.Module):
   block is one conv + one activation (the nonlinearity between
   stacked blocks -- without it two convs fold into a single
   kernel). The head hyperparameters are kernel_size (+ the
-  rescale_kernel flag), n_blocks_cnn, groups, separable, and
+  rescale_kernel flag), n_blocks_cnn, groups, separable, film, and
   gate_init.
 
   groups restricts that channel mixing along the one physical cut
@@ -261,6 +261,18 @@ class ResCNN(nn.Module):
                    low-rank factorization of the same sum, ~k/2
                    times fewer weights). See the separable
                    paragraph and graph in the class docstring.
+    film         = False (default): the head is one fixed map,
+                   blind to the cosmology. True: re-inject the
+                   parameters into every block as a per-channel
+                   affine, conv -> gamma(x)*c + beta(x) -> act,
+                   with one identity-initialized FiLMGenerator
+                   per block (Linear(input_dim, 2*n_bins) --
+                   ~2*n_bins*input_dim parameters each, see the
+                   generator's docstring and
+                   notes/film-conditioning.md). The gate stays as
+                   the outer valve; FiLM modulates inside the
+                   blocks, letting the cosmology choose which
+                   bins to amplify and by how much.
     n_blocks     = residual blocks in the trunk.
     n_blocks_cnn = stacked conv+activation correction blocks.
     gate_init    = initial value of the scalar scaling the
@@ -282,8 +294,8 @@ class ResCNN(nn.Module):
 
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
                kernel_size=11, rescale_kernel=False, groups=1,
-               separable=False, n_blocks=3, n_blocks_cnn=1,
-               gate_init=0.1, block_opts=None):
+               separable=False, film=False, n_blocks=3,
+               n_blocks_cnn=1, gate_init=0.1, block_opts=None):
     super().__init__()
     if block_opts is None:
       block_opts = {}
@@ -405,6 +417,19 @@ class ResCNN(nn.Module):
     nn.init.zeros_(last.weight)
     nn.init.zeros_(last.bias)
 
+    # FiLM (film=True): one identity-initialized generator per
+    # block predicts a per-bin (gamma, beta) from the parameters,
+    # re-injecting cosmology the head otherwise never sees. At
+    # init gamma = 1 / beta = 0, so the identity start above is
+    # untouched. None (default) = the fixed, parameter-blind head.
+    self.film_gens = None
+    if film:
+      gens = []
+      for _ in range(n_blocks_cnn):
+        gens.append(FiLMGenerator(n_cond=input_dim,
+                                  n_channels=self.n_bins))
+      self.film_gens = nn.ModuleList(gens)
+
     # learnable scalar gate on the correction (small init, not 0).
     self.gate = nn.Parameter(torch.tensor(float(gate_init)))
 
@@ -436,7 +461,15 @@ class ResCNN(nn.Module):
     c = padded.view(-1, self.n_bins, self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      c = self.acts[i](self.convs[i](c))   # cross-bin, theta-local
+      c = self.convs[i](c)                 # cross-bin, theta-local
+      if self.film_gens is not None:
+        # FiLM re-injection: a per-bin affine whose coefficients
+        # depend on the parameters (identity at init). unsqueeze
+        # broadcasts (B, n_bins) over the theta axis -- the
+        # modulation is per channel, never per position.
+        gamma, beta = self.film_gens[i](x)
+        c = gamma.unsqueeze(-1) * c + beta.unsqueeze(-1)
+      c = self.acts[i](c)
     # gather the real entries back out of the padding, return to the
     # full-whitened basis (reminder: @ W_df goes d -> f), add
     # through the gate.
@@ -531,6 +564,18 @@ class ResTRF(nn.Module):
                    MLP shared by every bin -- the textbook block,
                    the ablation isolating the unique-MLP deviation
                    (see TRFBlock's permutation-equivariance caveat).
+    film         = False (default): the head is one fixed map,
+                   blind to the cosmology. True: after every
+                   TRFBlock, modulate the token stream with a
+                   per-token affine gamma(x)*t + beta(x) from an
+                   identity-initialized FiLMGenerator (one per
+                   block; tokens play the conv head's channel
+                   role, broadcast over the token width). The
+                   stream carries the correction (corr = stream -
+                   t0), so the cosmology chooses which bins'
+                   corrections to amplify; identity init keeps
+                   corr = 0 at epoch 1. See FiLMGenerator and
+                   notes/film-conditioning.md.
     block_opts   = ResBlock options (None -> {}); its "act" also
                    reaches the TRF MLPs, so head and trunk share
                    one activation family.
@@ -541,7 +586,7 @@ class ResTRF(nn.Module):
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
                n_heads=2, n_blocks=4, n_blocks_trf=1,
                n_mlp_blocks=2, gate_init=0.1, shared_mlp=False,
-               block_opts=None):
+               film=False, block_opts=None):
     super().__init__()
     if block_opts is None:
       block_opts = {}
@@ -591,6 +636,20 @@ class ResTRF(nn.Module):
                           act=trf_act, shared_mlp=shared_mlp))
     self.trf = nn.ModuleList(trf)
 
+    # FiLM (film=True): one identity-initialized generator per TRF
+    # block predicts a per-token (gamma, beta) from the parameters,
+    # re-injecting cosmology the head otherwise never sees. At init
+    # gamma = 1 / beta = 0, so blocks(t0) == t0 and corr = 0 still
+    # hold exactly. None (default) = the fixed, parameter-blind
+    # head.
+    self.film_gens = None
+    if film:
+      gens = []
+      for _ in range(n_blocks_trf):
+        gens.append(FiLMGenerator(n_cond=input_dim,
+                                  n_channels=self.n_bins))
+      self.film_gens = nn.ModuleList(gens)
+
     # learnable scalar gate on the correction (small init, not 0).
     self.gate = nn.Parameter(torch.tensor(float(gate_init)))
 
@@ -621,8 +680,16 @@ class ResTRF(nn.Module):
     # its natural width -- the blocks run directly on these.
     t0 = padded.view(-1, self.n_bins, self.max_bin)
     t = t0
-    for blk in self.trf:
-      t = blk(t)                      # cross-bin attention + MLPs
+    n = len(self.trf)
+    for i in range(n):
+      t = self.trf[i](t)              # cross-bin attention + MLPs
+      if self.film_gens is not None:
+        # FiLM re-injection: a per-token affine whose coefficients
+        # depend on the parameters (identity at init). unsqueeze
+        # broadcasts (B, n_bins) over the token width -- per bin,
+        # never per position.
+        gamma, beta = self.film_gens[i](x)
+        t = gamma.unsqueeze(-1) * t + beta.unsqueeze(-1)
     # the correction is what the blocks added: every block is the
     # identity at init, so t - t0 = 0 exactly at epoch 1 (the
     # identity start, with no output projection needed to host it).

@@ -256,8 +256,9 @@ acting in *theta order* so a convolution can exploit smoothness along the angula
 axis. Two orthogonal YAML keys pick the class: `train_args.model.name` is the
 architecture (`resmlp` | `rescnn` | `restrf`), and the separate `train_args.model.ia` key
 layers a factored intrinsic-alignment design on it (omit for the plain
-emulator; `ia: nla` makes the model emit templates the loss combines in closed
-form, so the IA amplitude never enters the network — `TemplateMLP` for
+emulator; `ia: nla` (1 amplitude, 3 templates) or `ia: tatt` (3 amplitudes,
+10 templates) makes the model emit templates the loss combines in closed
+form, so the IA amplitudes never enter the network — `TemplateMLP` for
 `resmlp`, `TemplateResCNN` for `rescnn`, whose gated conv corrects each
 template before the combine).
 
@@ -429,8 +430,8 @@ override blocks — and the stability guards `clip` (per-step gradient-norm
 ceiling) and `rewind` (reload the best weights + optimizer on every plateau
 lr cut)). Pick the model
 with `train_args.model.name` (the architecture, `resmlp` | `rescnn` | `restrf`) plus the
-optional `train_args.model.ia` key (the factored IA design, `nla`; omit for
-plain). The same YAML drives both
+optional `train_args.model.ia` key (the factored IA design, `nla` | `tatt`;
+omit for plain). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
 list is searched. Templates live in `example_yamls/`; copy one into your
 `--fileroot` (e.g. `train_single_emulator_cosmic_shear.yaml`) and edit it.
@@ -647,7 +648,7 @@ The small `nn.Module`s the models are assembled from.
 The full networks.
 
 - `ResMLP` — input projection → residual blocks → output projection → Affine.
-- `ResCNN` — ResMLP trunk + a gated bins-as-channels 1D-CNN correction in theta order (one `Conv1d(n_bins → n_bins, k)` kernel over the padded per-bin layout — theta-local and cross-bin, no channel expansion), via fixed basis-change buffers `W_fd` / `W_df` and the `pad_idx` scatter/gather. Head knobs (YAML `model.cnn`): `kernel_size` (tuned as if one block) + `rescale_kernel` (shrink the per-block kernel with depth at a fixed receptive field), `groups` (physical channel cuts: `2` = xi+ never mixes with xi−; on the factored head `3` = GG/GI/II isolated, `6` = both cuts — validated against the mask, other values error), `separable` (factor each block into a depthwise theta filter + pointwise channel mix — a low-rank factorization of the same conv, ~k/2 fewer weights), `n_blocks`, `gate_init`:
+- `ResCNN` — ResMLP trunk + a gated bins-as-channels 1D-CNN correction in theta order (one `Conv1d(n_bins → n_bins, k)` kernel over the padded per-bin layout — theta-local and cross-bin, no channel expansion), via fixed basis-change buffers `W_fd` / `W_df` and the `pad_idx` scatter/gather. Head knobs (YAML `model.cnn`): `kernel_size` (tuned as if one block) + `rescale_kernel` (shrink the per-block kernel with depth at a fixed receptive field), `groups` (physical channel cuts: `2` = xi+ never mixes with xi−; on the factored head `3` = GG/GI/II isolated, `6` = both cuts — validated against the mask, other values error), `separable` (factor each block into a depthwise theta filter + pointwise channel mix — a low-rank factorization of the same conv, ~k/2 fewer weights), `film` (re-inject the non-amplitude parameters into every block as an identity-initialized per-channel affine — the head becomes cosmology-aware instead of one fixed map; see `notes/film-conditioning.md`), `n_blocks`, `gate_init`:
 
 ```
   params ─▶ ResMLP trunk ─▶ y    (full-whitened, well-conditioned)

@@ -284,9 +284,12 @@ ResMLP-only trunk demands many more training points and the lean
 factored conv head (rescale_kernel + groups; production smoke config
 07-04q: kernel_size 11 target, 2 blocks -> k=7, groups=6 -> head
 19,187 vs trunk 76,048 excluding-linear) is supposed to buy sample
-efficiency with structure, not capacity. TATT is one IA_DESIGNS
-entry when the template dumps exist (tatt_coeffs written; n_amps=3,
-n_templates=10; groups generalizes to 10 | 20 automatically).
+efficiency with structure, not capacity. TATT code is LIVE as of 07-04v
+(ia: tatt -> IA_DESIGNS entry with amps LSST_A1_1/LSST_A2_1/
+LSST_BTA_1, tatt_coeffs, 10 templates; same Template* classes;
+groups 1|10|20; film works at tatt dims) -- BLOCKED only on the
+template training dumps, which do not exist yet. film flag now on
+BOTH head families (cnn + trf).
 Historical context (07-04l run): phase 2 collapsed to frac ~0.305
 after head epoch ~272 (untrimmed-chi2 fit the monster tail; full
 post-mortem in [[nla-as-design-spec]] 04l); fixes since = head trim

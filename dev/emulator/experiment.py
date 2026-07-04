@@ -55,7 +55,8 @@ from .loss_functions import make_chi2
 from .emulator_designs import ResMLP, ResCNN, ResTRF
 from .IA.emulator_designs import (TemplateMLP, TemplateResCNN,
                                   TemplateResTRF)
-from .IA.loss_functions import TemplateFactoredChi2, nla_coeffs
+from .IA.loss_functions import (TemplateFactoredChi2, nla_coeffs,
+                                tatt_coeffs)
 from .activations import make_activation
 from .training import (
   run_emulator, build_run_specs, pick_device, make_logger,
@@ -71,20 +72,28 @@ from .training import (
 # on it (absent/None = the plain emulator; "nla" = the model emits
 # three templates from the non-amplitude inputs and the loss combines
 # them in closed form as K0 + A1*K1 + A1^2*K2, so the amplitude never
-# enters the network -- exact generalization in A1; "tatt" is reserved
-# for the 3-amplitude, 10-template design). The classes carry
+# enters the network -- exact generalization in A1; "tatt" = the
+# same factoring with 3 amplitudes (a1, a2, b_TA) and 10 templates,
+# exact in all three -- see tatt_coeffs). The classes carry
 # capability flags build_geometry / build_specs read: factored
 # (AmplitudeFactorGeometry input + the template-combining loss),
 # needs_geom (geom injected for the fixed full<->theta basis buffers;
 # compile_mode defaulted to "default"), and needs_bins
 # (build_shear_angle_map run on the data geometry, attaching the
 # per-bin split the bin-token head needs).
-MODELS = {("resmlp", None):  ResMLP,
-          ("rescnn", None):  ResCNN,
-          ("restrf", None):  ResTRF,
-          ("resmlp", "nla"): TemplateMLP,
-          ("rescnn", "nla"): TemplateResCNN,
-          ("restrf", "nla"): TemplateResTRF}
+MODELS = {("resmlp", None):   ResMLP,
+          ("rescnn", None):   ResCNN,
+          ("restrf", None):   ResTRF,
+          ("resmlp", "nla"):  TemplateMLP,
+          ("rescnn", "nla"):  TemplateResCNN,
+          ("restrf", "nla"):  TemplateResTRF,
+          # tatt reuses the SAME factored classes: only the
+          # IA_DESIGNS entry (amplitude columns, polynomial,
+          # template count) differs -- the classes are generic in
+          # n_amps / n_templates.
+          ("resmlp", "tatt"): TemplateMLP,
+          ("rescnn", "tatt"): TemplateResCNN,
+          ("restrf", "tatt"): TemplateResTRF}
 
 # the amplitude column the NLA design factors out of the network input.
 # LSST_A1_1 is the NLA amplitude (enters xi as a linear field
@@ -93,14 +102,28 @@ MODELS = {("resmlp", None):  ResMLP,
 # stays an emulated input.
 NLA_AMP_NAMES = ["LSST_A1_1"]
 
+# the three amplitude columns the TATT design factors out, in
+# tatt_coeffs order [a1, a2, b_TA]: LSST_A1_1 (the linear/TA
+# amplitude), LSST_A2_1 (the quadratic/TT amplitude), LSST_BTA_1
+# (the density-weighting bias). The redshift-evolution powers
+# (LSST_A1_2, LSST_A2_2) sit inside the projection integrals and
+# stay emulated inputs, exactly as NLA's eta does.
+TATT_AMP_NAMES = ["LSST_A1_1", "LSST_A2_1", "LSST_BTA_1"]
+
 # one entry per factored IA design (the model.ia key): the amplitude
 # columns the input geometry appends (in coeff_fn order), the amplitude
-# polynomial, and the template count the model emits. TATT will add
-# {amp_names: [a1, a2, b_TA columns], coeff_fn: tatt_coeffs,
-# n_templates: 10} when its training dumps exist.
-IA_DESIGNS = {"nla": {"amp_names":   NLA_AMP_NAMES,
-                      "coeff_fn":    nla_coeffs,
-                      "n_templates": 3}}
+# polynomial, and the template count the model emits. Everything
+# downstream (AmplitudeFactorGeometry, TemplateFactoredChi2, the
+# models' n_amps / n_templates, the conv head's groups values) reads
+# this entry -- a new design is a new entry, never new code paths.
+# NOTE (tatt): the entry is live, but the template training dumps do
+# not exist yet -- a tatt run needs dv dumps holding the 10 templates.
+IA_DESIGNS = {"nla":  {"amp_names":   NLA_AMP_NAMES,
+                       "coeff_fn":    nla_coeffs,
+                       "n_templates": 3},
+              "tatt": {"amp_names":   TATT_AMP_NAMES,
+                       "coeff_fn":    tatt_coeffs,
+                       "n_templates": 10}}
 
 # The nested model-block schema. The YAML groups each component's
 # knobs in its own sub-block (mlp / activation / cnn / trf), so the
@@ -116,12 +139,14 @@ MODEL_BLOCK_KEYS = {
           "rescale_kernel": "rescale_kernel",
           "groups":         "groups",
           "separable":      "separable",
+          "film":           "film",
           "n_blocks":       "n_blocks_cnn",
           "gate_init":      "gate_init"},
   "trf": {"n_heads":      "n_heads",
           "n_blocks":     "n_blocks_trf",
           "n_mlp_blocks": "n_mlp_blocks",
           "shared_mlp":   "shared_mlp",
+          "film":         "film",
           "gate_init":    "gate_init"},
 }
 
@@ -262,8 +287,9 @@ class EmulatorExperiment:
     self.model_cls  = model_cls
     # display name + IA design + architecture, overwritten by
     # from_config with the YAML's composed name/ia. The
-    # direct-construction fallbacks: the design comes from the class's
-    # factored flag ("nla" is the one implemented design); arch stays
+    # direct-construction fallbacks: a factored class defaults to
+    # "nla" (a direct-construction tatt run must set exp.ia = "tatt"
+    # itself -- from_config does this from the YAML); arch stays
     # None, which skips build_specs' head-block-vs-architecture check.
     self.model_name = model_cls.__name__.lower()
     self.ia = ("nla" if getattr(model_cls, "factored", False)

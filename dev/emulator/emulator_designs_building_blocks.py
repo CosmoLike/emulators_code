@@ -1,5 +1,5 @@
 """Shared nn building blocks (Affine, ResBlock, rescale_kernel_size,
-BinLinear, TRFBlock).
+FiLMGenerator, BinLinear, TRFBlock).
 
 The small nn.Modules the emulator models (emulator_designs.py) are
 assembled from. Where each piece sits:
@@ -16,7 +16,9 @@ Affine is a learnable scalar scale and shift (the default ResBlock
 residual block (n dense layers, each with a norm and activation
 factory, skip added before the last). rescale_kernel_size shrinks
 the conv heads' kernel as their depth grows, preserving a single
-block's receptive field. BinLinear and TRFBlock are the ResTRF
+block's receptive field. FiLMGenerator predicts the conv heads'
+optional per-channel, cosmology-dependent modulation (the film
+flag). BinLinear and TRFBlock are the ResTRF
 head's pieces: per-token unique linears and a transformer block
 whose tokens are the tomographic bins. Grouped / per-bin conv twins
 live in parallel/.
@@ -207,6 +209,77 @@ def rescale_kernel_size(kernel_size, n_blocks_cnn):
   if k % 2 == 0:
     k += 1
   return k
+
+
+class FiLMGenerator(nn.Module):
+  """
+  Predicts a per-channel affine modulation (gamma, beta) from a
+  conditioning vector -- the generator half of FiLM (Feature-wise
+  Linear Modulation; Dumoulin et al. 2018, and the recovered
+  design note notes/film-conditioning.md).
+
+    z  (B, n_cond)            conditioning vector (here: the
+       │                      NON-amplitude whitened parameters)
+       │  Linear(n_cond, 2*C)
+       ▼
+    out (B, 2*C)
+       │  split at C
+       ▼
+    gamma (B, C), beta (B, C)     one scale + one shift PER
+                                  CHANNEL, per sample
+
+  The caller applies them to a feature map h of shape (B, C, L) as
+
+    gamma.unsqueeze(-1) * h + beta.unsqueeze(-1)
+
+  broadcasting over the length axis: the modulation depends on the
+  cosmology and the channel, never on the position -- cosmology
+  sets a global property of each channel's piece of the data
+  vector, not a per-theta local correction. This is what
+  re-injects parameter information into a correction head that
+  otherwise only ever sees the trunk's output: without FiLM the
+  head is one fixed map applied identically at every point of
+  parameter space; with it, the cosmology chooses which channels
+  to amplify or suppress, and by how much.
+
+  Identity at init: the weight is zeroed and the bias set to
+  gamma = 1, beta = 0, so FiLM starts as a no-op for every input
+  -- the same identity-start convention as the zero-init conv and
+  the TRFBlock branches (the model still equals its trunk exactly
+  at epoch 1 and at a two-phase handoff). Gradients reach the
+  zeroed weight through the inputs, so it wakes as soon as a
+  cosmology-dependent modulation helps.
+
+  (legend: B = batch rows; n_cond = conditioning width -- the
+  factored heads pass the non-amplitude parameter slice, keeping
+  the head amplitude-blind so the closed-form amplitude exactness
+  survives; C = number of channels to modulate; L = the broadcast
+  length axis, max_bin here.)
+
+  Arguments:
+    n_cond     = conditioning-vector width.
+    n_channels = number of channels C to modulate.
+  """
+  def __init__(self, n_cond, n_channels):
+    super().__init__()
+    self.n_channels = n_channels
+    # one linear producing both halves at once: columns [:C] are
+    # gamma, [C:] are beta.
+    self.linear = nn.Linear(in_features=n_cond,
+                            out_features=2 * n_channels)
+    # identity init: zero weight kills the z-dependence, the bias
+    # supplies gamma = 1 / beta = 0 (init fns run under no_grad;
+    # the slices are views into the one bias parameter).
+    nn.init.zeros_(self.linear.weight)
+    nn.init.ones_(self.linear.bias[:n_channels])
+    nn.init.zeros_(self.linear.bias[n_channels:])
+
+  def forward(self, z):
+    # z: (B, n_cond) -> (B, 2C), split into the two halves.
+    out = self.linear(z)
+    gamma = out[:, :self.n_channels]    # (B, C)
+    beta  = out[:, self.n_channels:]    # (B, C)
+    return gamma, beta
 
 
 class BinLinear(nn.Module):

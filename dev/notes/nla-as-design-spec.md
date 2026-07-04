@@ -118,6 +118,62 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**TRF FILM + TATT ACTIVATED (2026-07-04v; user: "so no film To
+TRF? Once you do all that you need to implement the TATT version
+for ia").** (A) model.trf.film bool: ResTRF + TemplateResTRF get
+one identity-initialized FiLMGenerator per TRF block, applied to
+the TOKEN STREAM after each block (t = gamma(z)*t + beta(z),
+per-token, broadcast over max_bin; the stream carries the
+correction corr = stream - t0, so identity init keeps corr = 0
+exactly -- tested bit-exact). Tokens play the conv head's channel
+role; conditioning = full input (plain) / x[:, :n_in] (factored,
+amplitude-blind -- tested with randomized wo + last-MLP + generator
+weights). Generators freeze/train with the head in set_train_phase.
+(B) ia: tatt is LIVE: TATT_AMP_NAMES = [LSST_A1_1, LSST_A2_1,
+LSST_BTA_1] (tatt_coeffs order a1, a2, b_TA; the eta powers
+LSST_A1_2/LSST_A2_2 stay emulated inputs); IA_DESIGNS["tatt"] =
+{3 amps, tatt_coeffs, 10 templates}; MODELS routes (resmlp|rescnn|
+restrf, "tatt") to the SAME Template* classes -- zero new code
+paths, exactly as the registry was designed (everything downstream
+reads IA_DESIGNS: AmplitudeFactorGeometry columns,
+TemplateFactoredChi2 n_amps, model n_amps/n_templates, conv groups
+-> 1|10|20 automatic). Verified at tatt dims: ch = 300 conv head
+with groups=20 + separable + film builds and is amplitude-blind in
+ALL THREE amplitudes; 300-token TRF builds; tatt_coeffs == hand
+formula; loss combine == manual einsum; groups=6 rejected. The
+"tatt reserved" comments retired (experiment.py, YAML, README).
+GATING ITEM: training dumps holding the 10 TATT templates do not
+exist yet -- the code path waits on them. test_trf_film_tatt.py
+(15 checks); full 12-suite battery green.
+
+**FILM RE-INJECTION BUILT (2026-07-04u; user: "ok lets implement
+it", after recovering the months-old claude.ai FiLM guide --
+recovered design + full mapping in [[film-conditioning]]).** New
+model.cnn.film bool (default off, house rule): one
+identity-initialized FiLMGenerator per conv block
+(Linear(n_cond, 2*C), zero weight, bias gamma=1/beta=0; new
+building block with full docstring+graph) predicting a
+per-channel affine applied conv -> gamma(z)*c + beta(z) -> act.
+Conditioning z: ResCNN = the full input; TemplateResCNN =
+x[:, :n_in] ONLY (the non-amplitude slice the trunk consumes) --
+amplitude-blindness preserved BY CONSTRUCTION, tested with
+randomized head weights (vary the amplitude column -> output
+bit-identical; vary a cosmology column -> the correction moves).
+Identity start untouched (bit-exact model == trunk at init, tested
+both classes); generators are head params (set_train_phase freezes
+them with the head; grads flow in head phase). Cost at nla dims:
+2,160/block (= one separable block, coincidentally); current smoke
+head 4,427 -> 8,747 with 2 blocks. Composes with groups +
+separable + rescale_kernel (tested) and the compiled fwd_loss
+(static shapes). ONE boolean only -- no d_latent knob, the
+conditioning source is fixed as the trunk's own input. FiLM
+strictly generalizes the per-template gate (gate = constant
+per-template outer valve, kept; FiLM = per-channel function of
+cosmology inside blocks). Ablation ladder next: film_grouped
+(per-channel generators, same count) and conditional LayerNorm in
+TRFBlock -- see [[film-conditioning]]. test_film.py (12 checks);
+full 11-suite battery green. YAML/README/tune docs updated.
+
 **LAUNCH-BOUND FIX: COMPILED FWD+LOSS + PRE-SHUFFLE (2026-07-04t;
 user approved option 5 after the MCMC-contention incident showed
 epochs are launch-bound, +50% under CPU load).** Diagnosis recap: a

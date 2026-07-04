@@ -48,7 +48,7 @@ train_args:
   model:                 # name + ia pick the class; nested sub-blocks
     # name = the ARCHITECTURE (resmlp | rescnn | restrf); ia = the factored
     # intrinsic-alignment design layered on it (omit for the plain
-    # emulator; nla). Both fixed across the study -- see the training
+    # emulator; nla | tatt). Both fixed across the study -- see the training
     # YAML's model block for the full nested schema. Any numeric leaf
     # inside a sub-block may be a [default, min, max, kind] range.
     name: resmlp
@@ -67,6 +67,7 @@ train_args:
     #   groups:      1       # fixed choice per study (1 | 2 plain;
     #                        # 1 | 3 | 6 with ia: nla) -- not a range
     #   separable:   false   # depthwise + pointwise factorization
+    #   film:        false   # cosmology-aware per-channel affine
     #   n_blocks:    [1, 1, 3, int]
     #   gate_init:   0.1
     # trf:                   # name: restrf only (tokens at the natural
@@ -77,6 +78,7 @@ train_args:
     #   n_blocks:     [1, 1, 3, int]
     #   n_mlp_blocks: [2, 1, 4, int]
     #   shared_mlp:   false    # true = textbook shared-MLP ablation
+    #   film:         false    # cosmology-aware per-token affine
     #   gate_init:    0.1
     # compile_mode: default  # conv/TRF models already default to this
     #                        # (reduce-overhead is worth one retry)

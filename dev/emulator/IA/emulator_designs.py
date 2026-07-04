@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from ..activations import activation_fcn
 from ..emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock, rescale_kernel_size)
+  Affine, ResBlock, TRFBlock, FiLMGenerator, rescale_kernel_size)
 
 
 class NLATemplateMLP(nn.Module):
@@ -217,7 +217,7 @@ class TemplateResCNN(nn.Module):
   size, so the bandwidth wall the old expand-to-C-filters head hit
   cannot occur by construction. Each block is one conv + one
   activation. The head hyperparameters are kernel_size (+ the
-  rescale_kernel flag), n_blocks_cnn, groups, separable, and
+  rescale_kernel flag), n_blocks_cnn, groups, separable, film, and
   gate_init. The
   A1 exactness is untouched: it lives in the loss's combine, and
   the head emits amplitude-blind templates (true for every groups
@@ -311,8 +311,8 @@ class TemplateResCNN(nn.Module):
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, kernel_size=11,
                rescale_kernel=False, groups=1, separable=False,
-               n_blocks=4, n_blocks_cnn=1, gate_init=0.1,
-               block_opts=None):
+               film=False, n_blocks=4, n_blocks_cnn=1,
+               gate_init=0.1, block_opts=None):
     """Build the template trunk, the conv head, the buffers.
 
     Arguments:
@@ -355,6 +355,18 @@ class TemplateResCNN(nn.Module):
                      low-rank factorization of the same sum,
                      ~k/2 times fewer weights). See the separable
                      paragraph in the class docstring.
+      film         = False (default): the head is one fixed map,
+                     blind to the cosmology. True: re-inject the
+                     NON-AMPLITUDE parameters into every block as
+                     a per-(template, bin)-channel affine, conv ->
+                     gamma(z)*c + beta(z) -> act, one
+                     identity-initialized FiLMGenerator per block
+                     (Linear(n_in, 2*n_ch); see its docstring and
+                     notes/film-conditioning.md). The conditioning
+                     is x[:, :n_in] -- the amplitudes NEVER enter,
+                     so the head stays amplitude-blind and the
+                     closed-form amplitude exactness survives. The
+                     per-template gate stays as the outer valve.
       n_blocks     = residual blocks in the trunk.
       n_blocks_cnn = stacked conv+activation correction blocks.
       gate_init    = initial per-template correction scale. Small
@@ -508,6 +520,21 @@ class TemplateResCNN(nn.Module):
     nn.init.zeros_(last.weight)
     nn.init.zeros_(last.bias)
 
+    # FiLM (film=True): one identity-initialized generator per
+    # block predicts a per-(template, bin) (gamma, beta) from the
+    # NON-amplitude parameters (n_cond = n_in: the amplitudes never
+    # enter, so the head stays amplitude-blind and the closed-form
+    # amplitude exactness survives). At init gamma = 1 / beta = 0,
+    # so the identity start above is untouched. None (default) =
+    # the fixed, parameter-blind head.
+    self.film_gens = None
+    if film:
+      gens = []
+      for _ in range(n_blocks_cnn):
+        gens.append(FiLMGenerator(n_cond=self.n_in,
+                                  n_channels=n_ch))
+      self.film_gens = nn.ModuleList(gens)
+
     # training phase, set by set_train_phase: "joint" (default,
     # everything trains), "trunk" (head frozen AND bypassed -- the
     # model runs as a pure TemplateMLP at TemplateMLP cost), "head"
@@ -559,6 +586,11 @@ class TemplateResCNN(nn.Module):
       p.requires_grad_(head_on)
     for p in self.acts.parameters():
       p.requires_grad_(head_on)
+    if self.film_gens is not None:
+      # the FiLM generators are head parameters: frozen with the
+      # head in the trunk phase, trained with it in the head phase.
+      for p in self.film_gens.parameters():
+        p.requires_grad_(head_on)
     self.gate.requires_grad_(head_on)
 
   def forward(self, x):
@@ -601,7 +633,16 @@ class TemplateResCNN(nn.Module):
                     self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      c = self.acts[i](self.convs[i](c))      # cross-bin+template
+      c = self.convs[i](c)                    # cross-bin+template
+      if self.film_gens is not None:
+        # FiLM re-injection: a per-(template, bin) affine whose
+        # coefficients depend on the NON-amplitude parameters
+        # (identity at init; amplitude-blind by construction --
+        # the slice below is the same one the trunk consumes).
+        # unsqueeze broadcasts (B, T*n_bins) over the theta axis.
+        gamma, beta = self.film_gens[i](x[:, :self.n_in])
+        c = gamma.unsqueeze(-1) * c + beta.unsqueeze(-1)
+      c = self.acts[i](c)
     # gather the real entries back out of the padding (per
     # template), return to the full-whitened basis (reminder:
     # @ W_df goes d -> f), add through the per-template gate.
@@ -685,7 +726,8 @@ class TemplateResTRF(nn.Module):
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, n_heads=2,
                n_blocks=4, n_blocks_trf=1, n_mlp_blocks=2,
-               gate_init=0.1, shared_mlp=False, block_opts=None):
+               gate_init=0.1, shared_mlp=False, film=False,
+               block_opts=None):
     """Build the template trunk, the TRF head, the buffers.
 
     Arguments:
@@ -717,6 +759,17 @@ class TemplateResTRF(nn.Module):
                      -- the textbook block, the ablation isolating
                      the unique-MLP deviation (see TRFBlock's
                      permutation-equivariance caveat).
+      film         = False (default): the head is one fixed map,
+                     blind to the cosmology. True: after every
+                     TRFBlock, modulate the token stream with a
+                     per-(template, bin)-token affine gamma(z)*t +
+                     beta(z) from an identity-initialized
+                     FiLMGenerator (one per block), conditioned on
+                     x[:, :n_in] only -- the amplitudes never
+                     enter, so the head stays amplitude-blind and
+                     the closed-form amplitude exactness survives.
+                     Identity init keeps corr = 0 at epoch 1. See
+                     FiLMGenerator and notes/film-conditioning.md.
       block_opts   = ResBlock options (None -> {}); its "act" also
                      reaches the TRF MLPs, so head and trunk share
                      one activation family.
@@ -776,6 +829,22 @@ class TemplateResTRF(nn.Module):
                           act=trf_act, shared_mlp=shared_mlp))
     self.trf = nn.ModuleList(trf)
 
+    # FiLM (film=True): one identity-initialized generator per TRF
+    # block predicts a per-(template, bin)-token (gamma, beta) from
+    # the NON-amplitude parameters (n_cond = n_in: the amplitudes
+    # never enter, so the head stays amplitude-blind and the
+    # closed-form amplitude exactness survives). At init gamma = 1
+    # / beta = 0, so blocks(t0) == t0 and corr = 0 still hold
+    # exactly. None (default) = the fixed, parameter-blind head.
+    self.film_gens = None
+    if film:
+      gens = []
+      for _ in range(n_blocks_trf):
+        gens.append(FiLMGenerator(
+          n_cond=self.n_in,
+          n_channels=n_templates * self.n_bins))
+      self.film_gens = nn.ModuleList(gens)
+
     # one learnable gate per template, (n_templates, 1) so it
     # broadcasts over (B, n_templates, n_keep).
     self.gate = nn.Parameter(
@@ -818,6 +887,11 @@ class TemplateResTRF(nn.Module):
       p.requires_grad_(trunk_on)
     for p in self.trf.parameters():
       p.requires_grad_(head_on)
+    if self.film_gens is not None:
+      # the FiLM generators are head parameters: frozen with the
+      # head in the trunk phase, trained with it in the head phase.
+      for p in self.film_gens.parameters():
+        p.requires_grad_(head_on)
     self.gate.requires_grad_(head_on)
 
   def forward(self, x):
@@ -863,8 +937,17 @@ class TemplateResTRF(nn.Module):
     t0 = padded.view(B, self.n_templates * self.n_bins,
                      self.max_bin)
     t = t0
-    for blk in self.trf:
-      t = blk(t)                    # cross-bin + cross-template
+    n = len(self.trf)
+    for i in range(n):
+      t = self.trf[i](t)            # cross-bin + cross-template
+      if self.film_gens is not None:
+        # FiLM re-injection: a per-(template, bin)-token affine
+        # whose coefficients depend on the NON-amplitude
+        # parameters (identity at init; amplitude-blind by
+        # construction). unsqueeze broadcasts (B, T*n_bins) over
+        # the token width.
+        gamma, beta = self.film_gens[i](x[:, :self.n_in])
+        t = gamma.unsqueeze(-1) * t + beta.unsqueeze(-1)
     # the correction is what the blocks added (t - t0 = 0 at init:
     # every block starts as the identity). Unpack the tokens back to
     # (B, T, G*max_bin), gather the real entries out of the padding,

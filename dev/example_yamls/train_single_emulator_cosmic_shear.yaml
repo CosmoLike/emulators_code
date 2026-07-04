@@ -151,8 +151,12 @@ train_args:
     #           conv channels / attention tokens) -- the polynomial is
     #           untouched, so the correction stays exact in A1.
     #
-    #   tatt    Reserved (3 amplitudes, 10 templates) -- errors until
-    #           its training dumps exist.
+    #   tatt    The same factoring with 3 amplitudes (a1, a2, b_TA
+    #           = LSST_A1_1 / LSST_A2_1 / LSST_BTA_1) and 10
+    #           templates -- exact in all three amplitudes; the
+    #           redshift powers (LSST_A1_2, LSST_A2_2) stay emulated
+    #           inputs. The code path is live; a run needs dv dumps
+    #           holding the 10 templates.
     #
     name:        resmlp
     # ia:        nla
@@ -215,6 +219,13 @@ train_args:
     #                      # channel mix (a low-rank factorization of
     #                      # the same conv, ~k/2 times fewer weights;
     #                      # composes with groups + rescale_kernel).
+    #   film:        false # true = re-inject the (non-amplitude)
+    #                      # parameters into every block as a
+    #                      # per-channel affine gamma(z)*c + beta(z)
+    #                      # (identity-initialized; the head becomes
+    #                      # cosmology-aware instead of one fixed
+    #                      # map; ~2*channels*n_param params/block;
+    #                      # amplitude exactness untouched).
     #   n_blocks:    1     # stacked conv+activation blocks
     #   gate_init:   0.1   # initial correction scale (small, not 0)
     #
@@ -230,10 +241,14 @@ train_args:
     #                      # the bin length (26 -> 1 | 2 | 13)
     #   n_blocks:     1    # stacked transformer blocks
     #   n_mlp_blocks: 2    # each token's private MLP depth per block
-    #   shared_mlp: false  # true = ONE MLP for every token (the
+    #   shared_mlp: false  # true = one MLP for every token (the
     #                      # textbook block; ablation of the unique-MLP
     #                      # deviation -- then nothing structural tells
     #                      # tokens apart, no positional encoding)
+    #   film:       false  # true = after every TRF block, modulate
+    #                      # the token stream with a cosmology-
+    #                      # dependent per-token affine (identity-
+    #                      # initialized; same design as cnn.film)
     #   gate_init:    0.1  # initial correction scale (small, not 0)
     #
     # compile_mode: default  # conv/TRF models default to this because
