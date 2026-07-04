@@ -118,6 +118,30 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**HANDOFF-JUMP BUG FIXED (2026-07-04j; user's 300+700 rescnn+nla test
+showed phase-2 epoch 1 exploding: val 0.34 -> 4.96, train loss 54891,
+frac>0.2 -> 1.000).** ROOT CAUSE 1 (real bug): the warmup lr ramp was
+applied AFTER each epoch trained -- epoch 1 of EVERY pass trained at
+the FULL base lr while printing the ramped value it had just set for
+epoch 2. Harmless at a random init; at the two-phase handoff the
+full-strength first epoch wrecked the identity start. FIXED: warmup
+set at the TOP of the epoch (epoch e of W trains at base*e/W; the
+scheduler still only steps after warmup). ROOT CAUSE 2 (no safety
+net): best-tracking never evaluated the INCOMING model, so the
+handoff-quality weights were never snapshotted -- phase 2 could end
+worse than phase 1. FIXED: baseline epoch-0 eval seeds
+best_state/best_frac before the loop (printed as "epoch 0 baseline");
+a pass can now never END worse than it STARTED. AMPLIFIERS in the
+user's config (advice, not bugs): head loss_mode chi2 + trim 0.0 on a
+still-fat tail (trunk_epochs 300 is early; mean-chi2 directions get
+outlier-dominated) and gate_init 1.0 (full-scale corr). REVISED
+ADVICE: for phased runs keep gate_init 0.1 and give the head phase a
+small annealed trim (e.g. start 0.05 -> 0) or sqrt loss until the
+trunk is mature; the chi2/no-trim head objective is for a
+well-converged trunk. Loop-level tests: test_warmup_baseline.py
+(lr ramp captured during training via a forward probe; destructive
+pass returns incoming weights bit-exact).
+
 **TO DISCUSS (user, 2026-07-04, deferred -- "I am tired"): POSITIONAL
 ENCODING in the TRF, and whether position matters more generally in
 our designs.** User's instinct: shared_mlp probably NEEDS a positional

@@ -620,11 +620,32 @@ def training_loop_batched(nepochs,
 
   # track the best epoch by the inference metric -- the fraction
   # of val points with chi2 > the first threshold (0.2) -- to keep
-  # the best model, not the last.
-  best_frac  = float("inf")
-  best_state = None
-  best_epoch = 0
-  best_median = float("inf")
+  # the best model, not the last. Seeded by a BASELINE eval of the
+  # INCOMING weights (epoch 0, before any training), so a pass can
+  # never end worse than it started: ordinarily the baseline is a
+  # random init and is overtaken immediately, but at the two-phase
+  # handoff the incoming model is phase 1's best (the zero-init
+  # head makes them identical), and this seed guarantees phase 2
+  # returns at least that even if its first epochs wander.
+  model.eval()
+  b_median, b_mean, b_frac = eval_val(model=model,
+                                      lossfn=lossfn,
+                                      data=data["val"],
+                                      load=load,
+                                      bs=bs,
+                                      thresholds=thresholds)
+  best_frac   = b_frac[0].item()
+  best_median = b_median
+  best_epoch  = 0
+  # snapshot the incoming weights (clone: state_dict returns live
+  # references that training would overwrite).
+  best_state = {}
+  for k, v in model.state_dict().items():
+    best_state[k] = v.detach().clone()
+  if not silent:
+    print(f"epoch   0  baseline (no training yet): "
+          f"val {b_mean:.4f}  med {b_median:.4f}"
+          f"  frac>0.2 {best_frac:.4f}")
 
   # kappa = chi2 scale where the focal weight turns on (fixed over
   # the run, unlike the annealed gamma); from focus_opts, default
@@ -640,6 +661,17 @@ def training_loop_batched(nepochs,
 
   for epoch in range(1, nepochs + 1):
     t_epoch = time.perf_counter()
+    # warmup BEFORE this epoch trains: epoch e (of W) runs at
+    # base*e/W, so epoch 1 uses base/W -- protecting exactly the
+    # steps warmup exists for. (It used to be applied after the
+    # epoch: epoch 1 of every pass then trained at the FULL base lr
+    # while printing the ramped value it had just set for epoch 2 --
+    # at a two-phase handoff that full-strength first epoch could
+    # wreck the identity start.)
+    if epoch <= warmup_epochs:
+      scale = epoch / warmup_epochs
+      for grp, base in zip(optimizer.param_groups, base_lrs):
+        grp["lr"] = base * scale
     model.train()
     perm = tidx[torch.randperm(ntrain).numpy()]
 
@@ -736,19 +768,14 @@ def training_loop_batched(nepochs,
       for k, v in model.state_dict().items():
         best_state[k] = v.detach().clone()
 
-    if epoch <= warmup_epochs:
-      # linear warmup: ramp each group's lr from base/W up to base
-      # over the first W = warmup_epochs epochs, then hand off to
-      # the plateau scheduler -- not stepped during warmup, since
-      # its no-improvement counter must not run while lr rises.
-      scale = epoch / warmup_epochs
-      for grp, base in zip(optimizer.param_groups, base_lrs):
-        grp["lr"] = base * scale
-    else:
-      # steps once per epoch -- right for ReduceLROnPlateau and
-      # epoch schedulers (StepLR, CosineAnnealingLR). A per-batch
-      # scheduler (OneCycleLR) would step inside the batch loop
-      # instead, not here.
+    # the scheduler takes over once the warmup ramp (applied at the
+    # top of the epoch) is done -- not stepped during warmup, since
+    # the plateau scheduler's no-improvement counter must not run
+    # while the lr rises. Steps once per epoch -- right for
+    # ReduceLROnPlateau and epoch schedulers (StepLR,
+    # CosineAnnealingLR); a per-batch scheduler (OneCycleLR) would
+    # step inside the batch loop instead.
+    if epoch > warmup_epochs:
       if isinstance(scheduler,
                     lr_scheduler.ReduceLROnPlateau):
         scheduler.step(median)
@@ -772,11 +799,12 @@ def training_loop_batched(nepochs,
             f"  val {mean:.4f}  med {median:.4f}"
             f"  frac>[{fr}]  {dt:5.1f}s")
 
-  if best_state is not None:
-    model.load_state_dict(best_state)
-    if not silent:
-      print(f"best epoch {best_epoch}: "
-            f"frac>0.2 {best_frac:.4f}")
+  # restore the best epoch's weights (possibly the epoch-0 baseline:
+  # the pass then returns exactly what it was handed).
+  model.load_state_dict(best_state)
+  if not silent:
+    print(f"best epoch {best_epoch}: "
+          f"frac>0.2 {best_frac:.4f}")
 
   if not silent:
     # total wall time and the steady-state per-epoch rate (epochs
