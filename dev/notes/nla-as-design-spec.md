@@ -143,7 +143,17 @@ mixing REJECTED for now (2x params, no evidence of
 calibration-like multiplicative residuals -- revisit if
 diagnostics show whole-bin scale errors); max/pooling rejected
 (discards sign); attention = restrf, not a CNN flag.
-test_separable.py (10 checks) + full battery green.
+test_separable.py (10 checks) + full battery green. PRODUCTION
+TIMING (07-04 smoke run): param print verified to the digit (head
+4,427 vs trunk 76,048), but head epochs got SLOWER, 3.9s vs ~2.9s
+plain -- params and wall time are decoupled on the small-SM GPU
+(same lesson as the conv-as-matmul revert): the head phase is
+W_fd/W_df-dominated, so cutting 80% of conv weight saves ~nothing
+while the two-kernels-per-block structure (depthwise =
+bandwidth-bound, low arithmetic intensity) adds overhead. separable
+buys PARAMETER economy (sample efficiency / regularization -- the
+currency of the TATT+w0wa comparison), not speed; use plain conv
+when wall time matters more.
 
 **CONV GROUPS: PHYSICAL CHANNEL CUTS (2026-07-04p; user: "I want
 groups=3 ... groups=2 (xi+ never mixes with xi-) ... and groups=6

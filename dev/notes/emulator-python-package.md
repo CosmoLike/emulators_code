@@ -259,7 +259,13 @@ both example_yamls, README). GOAL REFRAME (2026-07-04, user): the
 0.1105 rescnn+nla number (07-04l) is STALE -- do not treat it or
 "goal 0.10" as the target of the current runs. Current two-phase
 runs are "non-absurd tests" only: does training run end to end,
-handoff loss-continuous, no loss jumps/explosions. The REAL
+handoff loss-continuous, no loss jumps/explosions. SMOKE TESTS
+PASSED (07-04, user: "everything is in order"): rewind verified at
+a live lr cut (near-no-op at a healthy plateau, as designed);
+trunk-vs-head param print exact to the digit incl. separable
+(4,427); handoff baseline seeded from phase-1 best; groups=6 +
+rescale_kernel + separable all ran in production. The whole 07-04
+feature stack is validated; next stop is the TATT + w0wa dumps. The REAL
 comparison arrives with TATT + w0wa dumps: that is where a
 ResMLP-only trunk demands many more training points and the lean
 factored conv head (rescale_kernel + groups; production smoke config
