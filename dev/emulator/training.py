@@ -388,6 +388,61 @@ def search_defaults(train_args):
   return out
 
 
+def audit_devices(model, lossfn, device):
+  """
+  Name every tensor that should live on `device` but does not.
+
+  A stray off-device tensor inside the compiled forward+loss
+  disables CUDA-graph replay silently: inductor only warns
+  "skipping cudagraphs due to cpu device (primals_N)", and
+  primals_N is a traced-input position, useless for finding the
+  owner. This walk names owners directly. Checked: every model
+  parameter and buffer (named_* reach through a torch.compile
+  wrapper), and every tensor attribute of lossfn and of
+  lossfn.geom -- the loss's geometry carries the whitening /
+  covariance tensors the chi2 contracts with, so they enter the
+  traced graph too.
+
+  A mismatch is a different device type (cpu vs cuda), or a
+  different index when both sides pin one (cuda:0 vs cuda:1 on a
+  two-GPU box breaks replay just as silently).
+
+  Arguments:
+    model  = the network (possibly torch.compile'd).
+    lossfn = the chi2/loss object; its .geom is walked when
+             present.
+    device = the device everything should live on.
+
+  Returns:
+    a list of "owner: actual_device" strings; empty when clean.
+  """
+  def mismatch(t):
+    if t.device.type != device.type:
+      return True
+    if device.index is not None and t.device.index is not None:
+      return t.device.index != device.index
+    return False
+
+  bad = []
+  for name, p in model.named_parameters():
+    if mismatch(p):
+      bad.append(f"model parameter {name}: {p.device}")
+  for name, b in model.named_buffers():
+    if mismatch(b):
+      bad.append(f"model buffer {name}: {b.device}")
+  owners = [("lossfn", lossfn)]
+  geom = getattr(lossfn, "geom", None)
+  if geom is not None:
+    owners.append(("lossfn.geom", geom))
+  for label, obj in owners:
+    # vars() = the instance's plain attributes (the geometry
+    # classes store their tensors that way); non-tensors skipped.
+    for name, v in vars(obj).items():
+      if isinstance(v, torch.Tensor) and mismatch(v):
+        bad.append(f"{label}.{name}: {v.device}")
+  return bad
+
+
 def eval_val(model, lossfn, data, load, bs, thresholds,
              fwd_chi2=None):
   """
@@ -1278,6 +1333,18 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                         model=model,
                         bs=bs,
                         budget=budget)
+
+  # device audit: a stray off-device tensor inside the compiled
+  # forward+loss disables CUDA-graph replay silently (inductor's
+  # "skipping cudagraphs due to cpu device (primals_N)" names a
+  # position, not an owner). Name the owners loudly instead; the
+  # run still proceeds -- this costs performance, not correctness.
+  if not silent:
+    for msg in audit_devices(model=model, lossfn=chi2fn,
+                             device=device):
+      print(f"device audit: {msg} -- expected {device}; an "
+            "off-device tensor in the compiled step disables "
+            "CUDA-graph replay")
 
   wmupe = lr_opts["warmup_epochs"]
 

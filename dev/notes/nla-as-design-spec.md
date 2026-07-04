@@ -151,6 +151,40 @@ rows from tidx; loaders already index globally). The full version
 user can generate. Extension ladder: fixed-photoz -> free-photoz
 head; LCDM trunk -> w0wa head.
 
+**FIRST FILM EVIDENCE (04w addendum, same day).** Truncated-trunk
+run (150 trunk epochs, best epoch 98 at frac 0.5000 -- deliberately
+immature) + film head (cnn: k11 rescale -> k5, groups 6, 3 blocks,
+separable, film, gate 1): head took frac 0.5000 -> 0.2766 BY EPOCH
+22 and val med 0.20 -> 0.091. Compare the film-less 150-trunk smoke
+(baseline 0.5586 -> plateaued ~0.37): the film head kept descending
+where the fixed head stalled -- consistent with the mechanism (an
+immature trunk's residuals are strongly parameter-dependent, which
+only film can express). NOT yet proof of the cross-space transfer
+premise (same parameter space both phases; the independent-subset
+practice run remains the discriminating test), but a necessary
+condition passed emphatically. Post-22 behavior: hard plateau, lr
+cuts rewinding to 22 repeatedly (harmless by design; the schedule
+positions advance through rewinds -- trim/focus are epoch-indexed
+and do not rewind). The RISING train loss (0.92 -> 1.6 over epochs
+11-52) is the trim shrinking (0.03 -> 0.01) + focus ramping
+re-weighting the objective, NOT divergence. Practical: head
+converges in ~25-150 epochs at this trunk quality -- use short
+head phases for iteration, not 2350 epochs. User next: more
+n_blocks (cheap: at this config each block ~ 4.2k params =
+separable conv ~1,980 + film 2,160 + act 52; rescale keeps the
+view fixed). WARNING TO INVESTIGATE: "skipping cudagraphs due to
+cpu device (primals_90)" at head-phase compile -- a stray CPU
+tensor in the traced fwd_loss/fwd_chi2 disabled CUDA-graph replay
+(compiled kernels still run, but no single-replay steps; part of
+the 5.6s/epoch). DEVICE AUDIT BUILT (same
+day): audit_devices(model, lossfn, device) in training.py walks
+every model parameter/buffer + every tensor attribute of lossfn
+and lossfn.geom, flagging type mismatches AND cuda-index
+mismatches (cuda:0 vs cuda:1 on the two-GPU boxes); run_emulator
+calls it after build_loaders and prints "device audit: <owner>:
+<device>" per offender (non-silent runs). test_device_audit.py.
+NEXT RUN will name primals_90's owner in plain text.
+
 **TRF FILM + TATT ACTIVATED (2026-07-04v; user: "so no film To
 TRF? Once you do all that you need to implement the TATT version
 for ia").** (A) model.trf.film bool: ResTRF + TemplateResTRF get
