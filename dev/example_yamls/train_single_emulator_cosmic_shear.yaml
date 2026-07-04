@@ -33,21 +33,50 @@ train_args:
   loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
   silent:    false       # false -> per-epoch progress lines
 
-  model:                 # name picks the class; other keys are its kwargs
-    name:        resmlp    # resmlp | rescnn | nla | nla_as. nla = factored
-                           # IA (3 templates, xi = K0 + A1 K1 + A1^2 K2;
-                           # A1 = LSST_A1_1 never enters the network).
-                           # nla_as also factors the linear-order As:
-                           # xi = Ats (K1 + A1 K2 + A1^2 K3), Ats = As/mean,
-                           # center scaled per sample; As stays an input.
-    int_dim_res: 128
-    n_blocks:    4
-    # ResCNN-only knobs (ignored by ResMLP) -- uncomment for rescnn:
+  model:
+    # `name` picks the network; the other keys are its kwargs.
+    #
+    # Choose exactly ONE name. YAML keeps the LAST `name:` key silently,
+    # so do not leave two uncommented (that is why a stray duplicate runs
+    # the wrong model with no error). The startup banner prints the
+    # resolved class, so check it matches what you intended.
+    #
+    #   resmlp  Plain residual MLP. The baseline; maps the whitened
+    #           parameters straight to the whitened data vector.
+    #
+    #   rescnn  ResMLP trunk + a 1-D CNN correction head (uncomment the
+    #           CNN knobs below). For theta-structured residuals.
+    #
+    #   nla     Factored intrinsic alignment. The net emits 3 templates
+    #           and the loss combines them in closed form:
+    #             xi = K1 + A1 * K2 + A1^2 * K3
+    #           The amplitude A1 (= LSST_A1_1) never enters the network,
+    #           so the emulator is exact in it and its prior costs zero
+    #           training coverage. LSST_A1_2 (the eta power) stays an input.
+    #
+    #   nla_as  nla, and also factor the linear-order As amplitude:
+    #             xi = Ats * (K1 + A1 * K2 + A1^2 * K3),  Ats = As / <As>
+    #           (<As> = training-mean As, so Ats ~ 1). The training center
+    #           is scaled per sample (whiten(dv - Ats * center)), so there
+    #           is no constant template. As STILL enters the net as an
+    #           input, because halofit makes the dv nonlinear in As; only
+    #           the linear-order amplitude is pulled out.
+    #
+    name:        resmlp
+    #
+    # Trunk kwargs (all four models):
+    int_dim_res: 128         # residual-block width
+    n_blocks:    4           # number of residual blocks
+    #
+    # ResCNN-only knobs (ignored by the others) -- uncomment for rescnn:
     # kernel_size:  11       # conv kernel width (odd)
     # channels:     16       # conv filters in the 1D-CNN appendix
     # n_blocks_cnn: 1        # stacked CNN correction blocks
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
     # compile_mode: default  # CUDA: ResCNN may need this, not reduce-overhead
+    #
+    # nla / nla_as need no kwargs here: n_amps and the 3 templates plus
+    # the amplitude column names are set automatically (experiment.py).
 
   optimizer:             # cls is fixed to AdamW in the script
     weight_decay: 0.0
