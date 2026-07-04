@@ -103,6 +103,56 @@ class ResBlock(nn.Module):
     return out
 
 
+def conv1d_as_matmul(conv, x):
+  """
+  Run an nn.Conv1d as one matmul -- same parameters, same output,
+  matmul-shaped compute.
+
+  The correction heads' conv shape (moderate channels over a tiny
+  length: 90 -> 90 channels, 26 theta positions) sits outside every
+  fast conv path and benchmarks at ~1% of matmul throughput -- the
+  conv alone was most of a head-phase epoch. A convolution IS a
+  linear map, so express it as one: pad, slide a kernel-wide window
+  along theta, and contract each position's (C_in x K) receptive
+  field against the flattened conv weight in a single
+  (B*L, C_in*K) @ (C_in*K, C_out) matmul. Output identical to
+  conv(x) to float precision; ~25x faster forward at the head shape
+  on CPU (~5x on the whole head-phase training step).
+
+  The parameters still live in the nn.Conv1d passed in -- same
+  state_dict, same checkpoints, same optimizer groups; only the
+  compute path changes.
+
+  Arguments:
+    conv = an nn.Conv1d with stride/dilation/groups = 1 and
+           symmetric same-padding (what the ResCNN heads build).
+    x    = (B, C_in, L) input.
+
+  Returns:
+    (B, C_out, L) tensor, contiguous, equal to conv(x).
+  """
+  K   = conv.kernel_size[0]
+  pad = conv.padding[0]
+  B, C, L = x.shape
+  xp = nn.functional.pad(x, (pad, pad))     # (B, C, L + 2*pad)
+  # unfold along the length axis: a strided VIEW (no copy) of shape
+  # (B, C, L, K) whose [b, c, l] slot is the K-window xp[b, c, l:l+K]
+  # -- position l's receptive field in channel c.
+  xu = xp.unfold(2, K, 1)
+  # gather each position's full (C, K) receptive field into one row:
+  # (B, L, C, K) -> (B*L, C*K). The reshape after the permute is
+  # where the one real copy happens.
+  m = xu.permute(0, 2, 1, 3).reshape(B * L, C * K)
+  # conv.weight is (C_out, C_in, K); flattened to (C_out, C*K) its
+  # rows match m's columns, so one GEMM computes every output
+  # position and channel at once.
+  y = m @ conv.weight.reshape(conv.out_channels, C * K).t()
+  y = y + conv.bias
+  # (B*L, C_out) -> (B, C_out, L); contiguous so downstream .view
+  # calls work.
+  return y.view(B, L, conv.out_channels).permute(0, 2, 1).contiguous()
+
+
 class BinLinear(nn.Module):
   """
   G independent Linear(in_features, out_features) layers -- one per

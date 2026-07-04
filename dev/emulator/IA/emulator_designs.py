@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from ..activations import activation_fcn
 from ..emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock)
+  Affine, ResBlock, TRFBlock, conv1d_as_matmul)
 
 
 class NLATemplateMLP(nn.Module):
@@ -410,7 +410,9 @@ class TemplateResCNN(nn.Module):
                     self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      c = self.acts[i](self.convs[i](c))      # cross-bin+template
+      # cross-bin+template; the conv runs as a matmul (identical
+      # map, ~25x faster at this conv shape -- see conv1d_as_matmul).
+      c = self.acts[i](conv1d_as_matmul(self.convs[i], c))
     # gather the real entries back out of the padding (per
     # template), return to the full-whitened basis, add through the
     # per-template gate.

@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from .activations import activation_fcn
 from .emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock)
+  Affine, ResBlock, TRFBlock, conv1d_as_matmul)
 
 
 class ResMLP(nn.Module):
@@ -242,7 +242,9 @@ class ResCNN(nn.Module):
     c = padded.view(-1, self.n_bins, self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      c = self.acts[i](self.convs[i](c))   # cross-bin, theta-local
+      # cross-bin, theta-local; the conv runs as a matmul (identical
+      # map, ~25x faster at this conv shape -- see conv1d_as_matmul).
+      c = self.acts[i](conv1d_as_matmul(self.convs[i], c))
     # gather the real entries back out of the padding, return to the
     # full-whitened basis, add through the gate.
     corr = c.reshape(-1, self.n_bins * self.max_bin)[:, self.pad_idx]

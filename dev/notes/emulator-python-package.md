@@ -243,7 +243,11 @@ started; new "epoch 0 baseline" stdout line).
 RESUME STATE: (1) rerun two-phase rescnn+nla with the fixed loop;
 head block advice = gate_init 0.1, chi2 + small annealed trim (start
 0.05 -> 0) until the trunk is mature; expect phase-2 epoch 1 ~=
-phase-1 best now. (2) restrf first runs (bin tokens; expect near-nla
+phase-1 best now. (1b) 07-04k: conv now runs as a matmul
+(conv1d_as_matmul; head epochs were conv-kernel-bound at ~1% matmul
+efficiency) -- ANOTHER reason to re-sync before the next run; expect
+head epochs ~1.2-1.5s from 2.9s. (2) restrf first runs (bin tokens;
+expect near-nla
 epoch cost). (3) POSITIONAL-ENCODING discussion pending (see TO
 DISCUSS in [[nla-as-design-spec]]). (4) production YAML gotchas: trf
 block must NOT have width (deleted knob) and n_heads must divide 26

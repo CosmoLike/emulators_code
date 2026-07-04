@@ -118,6 +118,28 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**CONV RUNS AS A MATMUL (2026-07-04k; user: head epochs 2.9s vs trunk
+0.7s, "please investigate").** Root cause was NOT compile/no_grad/
+scatter (all measured innocent, <2ms each): nn.Conv1d(90->90, k=11)
+over LENGTH 26 sits outside every fast conv path and ran at ~1% of
+matmul throughput (CPU probe: 48.7ms for 2.3M MACs/sample vs 0.48ms
+for the same-size W_fd matmul). Honest floor first: head-phase steps
+do ~10x the trunk phase's arithmetic anyway (12.9M vs 1.3M
+MACs/sample; W_fd/W_df 3x780x780 both ways ~5.5M + conv fwd+bwd
+~6.9M), so head epochs can never be trunk-cheap -- the fix targets
+only the ~100x conv inefficiency on top. Fix: conv1d_as_matmul in
+emulator_designs_building_blocks.py -- pad, unfold(2, K, 1) window
+view, one (B*L, C*K) @ (C*K, C_out) GEMM against the SAME nn.Conv1d
+weights (state_dict/checkpoints/optimizer groups unchanged; returns
+contiguous so downstream .view works). Used in both ResCNN and
+TemplateResCNN conv loops. Verified (test_conv_as_matmul.py, all
+suites re-run green): forward AND all grads match the native path to
+1e-5; CPU head step 80 -> 14.4ms (5.5x); expected on-GPU head epoch
+~1.2-1.5s from 2.9s (GPU convs less pathological than CPU, factor
+must be measured there). GOTCHA: takes effect only after re-syncing
+dev -> the training machine; the user's first rerun predated the
+patch landing, hence "didn't make a difference".
+
 **HANDOFF-JUMP BUG FIXED (2026-07-04j; user's 300+700 rescnn+nla test
 showed phase-2 epoch 1 exploding: val 0.34 -> 4.96, train loss 54891,
 frac>0.2 -> 1.000).** ROOT CAUSE 1 (real bug): the warmup lr ramp was
