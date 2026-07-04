@@ -118,6 +118,39 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**TRANSFER-LEARNING CURRICULUM IDEA (2026-07-04w, user, "for
+later" -- banked, NOT built).** Train the TRUNK on a restricted
+parameter space (fixed photo-z errors; later: LCDM only) using a
+cheap/large dump, then train the HEAD -- frozen trunk, fresh
+optimizer, the existing two-phase machinery -- on the FULL space
+(photo-z free; later: w0wa) with an independent, possibly much
+smaller dump. Motivation: extension training data is expensive;
+the head has 10-100x fewer params and learns only the residual, so
+its sample complexity should be far lower (multi-fidelity /
+residual-learning argument). KEY STRUCTURAL FACT: without film the
+head CANNOT carry new-parameter dependence at all (it is a fixed
+map of the trunk output); FiLM conditioning is the enabler, and
+the conditioning vector must include the head-only parameters --
+which the trunk should NOT see (exclude them from the trunk input
+rather than train-on-a-slice-and-extrapolate). The existing
+factored-amplitude machinery (append columns past n_in that the
+trunk drops and a downstream consumer reads) is the exact pattern
+to generalize: amplitudes -> loss; head-only params -> FiLM.
+RISKS: per-token affine FiLM may be too rigid for full photo-z
+freedom (may need more blocks / capacity -- measure); residual
+still needs coverage in the new directions; trunk quality caps the
+scheme (its systematic error must be head-correctable). PRACTICE
+EXPERIMENT (cheap, decisive, same dump): phase 1 trunk on N rows,
+phase 2 head on an INDEPENDENT N/2 subset (disjoint rows, fresh
+from the dump), vs baselines (same-set head; full-N head) -- if
+head-on-N/2-fresh matches, the head's sample appetite is small and
+the premise holds. Mechanism needed: per-phase training subsets in
+run_emulator (a head: n_train / fraction knob slicing disjoint
+rows from tidx; loaders already index globally). The full version
+(different dumps per phase) comes with the fixed-photo-z dump the
+user can generate. Extension ladder: fixed-photoz -> free-photoz
+head; LCDM trunk -> w0wa head.
+
 **TRF FILM + TATT ACTIVATED (2026-07-04v; user: "so no film To
 TRF? Once you do all that you need to implement the TATT version
 for ia").** (A) model.trf.film bool: ResTRF + TemplateResTRF get
