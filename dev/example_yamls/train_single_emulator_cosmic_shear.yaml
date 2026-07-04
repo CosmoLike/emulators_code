@@ -44,13 +44,21 @@ train_args:
   # trim / focus schedules per phase.
   # trunk_epochs: 1500
 
-  # Head-phase overrides (needs trunk_epochs > 0; error otherwise).
-  # By the handoff the trunk has absorbed most outliers, so the head
-  # pass may want a different objective. Every key is optional and
-  # falls back to the main value; trim / focus are FULL replacement
-  # blocks (same keys as the main ones, incl. kappa -- no merging),
-  # restarting at the head phase's own epoch 1.
-  # head:
+  # Per-phase overrides, SYMMETRIC (both need trunk_epochs > 0; error
+  # otherwise). The top-level loss_mode / lr / trim / focus below are
+  # the shared defaults; the trunk: block overrides them for phase 1
+  # and the head: block for phase 2. Every key is optional and falls
+  # back to the shared value; trim / focus are FULL replacement blocks
+  # (same keys as the main ones, incl. kappa -- no merging),
+  # restarting at the phase's own epoch 1.
+  # trunk:                   # phase 1 (pure-trunk training)
+  #   lr_base:   0.0025
+  #   loss_mode: sqrt
+  #   trim:      {start: 0.1, end: 0.025, hold_epochs: 50,
+  #               anneal_epochs: 300, shape: cosine}
+  #   focus:     {start: 0.0, end: 2.0, hold_epochs: 50,
+  #               anneal_epochs: 300, shape: linear, kappa: 0.15}
+  # head:                    # phase 2 (frozen trunk, head only)
   #   lr_base:   0.001       # phase-2 base lr (same sqrt-batch rule)
   #   loss_mode: chi2        # e.g. quadratic once outliers are gone
   #   trim:      {start: 0.0, end: 0.0, hold_epochs: 1,
@@ -109,43 +117,58 @@ train_args:
     name:        resmlp
     # ia:        nla
     #
-    # Trunk kwargs (all models):
-    int_dim_res: 128         # residual-block width
-    n_blocks:    4           # number of residual blocks
+    # Each component nests its own knobs, so the names stay short --
+    # cnn.n_blocks and trf.n_blocks need no suffixes. A head block the
+    # architecture does not have is IGNORED (keep cnn: and trf: both
+    # configured and switch models by changing name: alone); unknown
+    # keys at the top level or inside the ACTIVE blocks are loud
+    # errors.
     #
-    # Activation for the ResBlocks (the conv head shares it). One of:
-    #   H            the paper's learnable leaky/Swish gate (the default)
+    # The trunk (required; every architecture is built on it):
+    mlp:
+      width:    128        # residual-block width
+      n_blocks: 4          # number of residual blocks
+    #
+    # Activation for the ResBlocks (the heads share it). type is one
+    # of:
+    #   H            the paper's learnable leaky/Swish gate (default)
     #   power        H with a bounded learnable tail exponent
     #   multigate    K independent gates (K = n_gates)
     #   gated_power  K gates + the tail exponent
-    # The --activation flag, when given, overrides this key.
-    # activation: H
-    # n_gates:    3          # gates K for multigate / gated_power
+    # The --activation flag, when given, overrides type. A bare
+    # string (activation: H) is accepted as shorthand for the type.
+    # activation:
+    #   type:    H
+    #   n_gates: 3         # gates K for multigate / gated_power
     #
-    # Conv-head knobs (name: rescnn; ignored by the others). The
-    # channels are the bins themselves (with ia: nla, the (template,
-    # bin) pairs -- cross-template AND cross-bin; A1 exactness is
-    # unaffected, it lives in the loss combine), so the head's
-    # tensors never exceed the padded dv size and there is no
-    # channels knob to budget.
-    # kernel_size:  11       # conv kernel width (odd)
-    # n_blocks_cnn: 1        # stacked conv+activation blocks
+    # Conv head (name: rescnn only). The channels are the bins
+    # themselves (with ia: nla, the (template, bin) pairs --
+    # cross-template AND cross-bin; A1 exactness is unaffected, it
+    # lives in the loss combine), so the head's tensors never exceed
+    # the padded dv size and there is no channels knob to budget.
+    # cnn:
+    #   kernel_size: 11    # conv kernel width (odd)
+    #   n_blocks:    1     # stacked conv+activation blocks
+    #   gate_init:   0.1   # initial correction scale (small, not 0)
     #
-    # TRF-head knobs (name: restrf; ignored by the others):
-    # int_dim_trf:  32       # token embedding width (divisible by n_heads)
-    # n_heads:      4        # attention heads
-    # n_blocks_trf: 1        # stacked transformer blocks
-    # n_mlp_blocks: 2        # each bin's private MLP depth per block
+    # Transformer head (name: restrf only): each bin is one token,
+    # attention shares information across bins, each bin gets its own
+    # private MLP stack.
+    # trf:
+    #   width:        32   # token embedding width (divisible by n_heads)
+    #   n_heads:      4    # parallel attention patterns; same params
+    #                      # and FLOPs at any value (the d/H-narrow dot
+    #                      # products cancel the H-fold pattern count)
+    #   n_blocks:     1    # stacked transformer blocks
+    #   n_mlp_blocks: 2    # each bin's private MLP depth per block
+    #   gate_init:    0.1  # initial correction scale (small, not 0)
     #
-    # Shared head knobs (rescnn / restrf):
-    # gate_init:    0.1      # initial correction-gate scale (small, not 0)
     # compile_mode: default  # conv/TRF models default to this because
-    #                        # CUDA-graph capture (reduce-overhead) crashed
-    #                        # on the gated skip-add (torch <= 2.x, 2026-06).
-    #                        # reduce-overhead is worth ONE retry on a newer
-    #                        # torch: graphs remove the per-kernel launch
-    #                        # overhead (it either works or crashes in
-    #                        # epoch 1).
+    #                        # CUDA-graph capture (reduce-overhead)
+    #                        # crashed on the gated skip-add (torch <=
+    #                        # 2.x, 2026-06); reduce-overhead is worth
+    #                        # ONE retry on a newer torch (it either
+    #                        # works or crashes in epoch 1).
     #
     # The ia designs need no other kwargs: n_amps and the template
     # count plus the amplitude column names come from the design

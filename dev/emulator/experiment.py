@@ -82,6 +82,31 @@ IA_DESIGNS = {"nla": {"amp_names":   NLA_AMP_NAMES,
                       "coeff_fn":    nla_coeffs,
                       "n_templates": 3}}
 
+# The nested model-block schema. The YAML groups each component's
+# knobs in its own sub-block (mlp / activation / cnn / trf), so the
+# nesting carries the context and the keys stay short -- no
+# n_blocks-vs-n_blocks_cnn suffixes. The tables below map each
+# sub-block's YAML keys onto the model constructors' flat argument
+# names (the constructors are internal API; the YAML is the
+# interface). An unknown key raises, listing what is allowed.
+MODEL_BLOCK_KEYS = {
+  "mlp": {"width":        "int_dim_res",
+          "n_blocks":     "n_blocks"},
+  "cnn": {"kernel_size":  "kernel_size",
+          "n_blocks":     "n_blocks_cnn",
+          "gate_init":    "gate_init"},
+  "trf": {"width":        "int_dim_trf",
+          "n_blocks":     "n_blocks_trf",
+          "n_mlp_blocks": "n_mlp_blocks",
+          "n_heads":      "n_heads",
+          "gate_init":    "gate_init"},
+}
+
+# which head sub-block each architecture accepts (None = trunk only);
+# a cnn: block under name: restrf (etc.) is a config error, caught in
+# build_specs.
+ARCH_HEAD = {"resmlp": None, "rescnn": "cnn", "restrf": "trf"}
+
 # default reported delta-chi2 cutoffs; the first (0.2) is the emulator goal
 # and the best-model-selection metric.
 DEFAULT_THRESHOLDS = torch.tensor([0.2, 0.5, 1.0, 10.0, 100.0])
@@ -154,20 +179,28 @@ class EmulatorExperiment:
                      silent = optional (default False): silence the run;
                      trunk_epochs = optional (default 0): two-phase
                        schedule -- see run_emulator;
-                     head = optional mapping of head-phase overrides
-                       (lr_base / loss_mode / trim / focus), needs
-                       trunk_epochs > 0 -- see run_emulator.
+                     trunk / head = optional symmetric mappings of
+                       per-phase overrides (lr_base / loss_mode /
+                       trim / focus) over the shared top-level
+                       defaults; need trunk_epochs > 0 -- see
+                       run_emulator.
                    Plus six constructible sub-blocks (each a mapping):
-                     model = the model's kwargs -- "name" (the
-                       architecture: resmlp | rescnn) and "ia" (the
-                       factored IA design layered on it: omit for plain,
-                       "nla"; the pair picks the class), "activation" /
-                       "n_gates" (from_config / build_specs consume
-                       these, see the `activation` argument below) plus
-                       int_dim_res, n_blocks, and the head knobs
-                       (rescnn: kernel_size / n_blocks_cnn; restrf:
-                       int_dim_trf / n_heads / n_blocks_trf /
-                       n_mlp_blocks; gate_init for both);
+                     model = the NESTED model block: "name" (the
+                       architecture: resmlp | rescnn | restrf) and
+                       "ia" (the factored IA design layered on it:
+                       omit for plain, "nla"; the pair picks the
+                       class), then one sub-block per component --
+                       "mlp" (width, n_blocks; the trunk, required),
+                       "activation" ({type, n_gates} or a bare type
+                       string; see the `activation` argument below),
+                       "cnn" (kernel_size, n_blocks, gate_init; name
+                       rescnn only), "trf" (width, n_heads,
+                       n_blocks, n_mlp_blocks, gate_init; name restrf
+                       only) --
+                       plus an optional flat "compile_mode".
+                       build_specs translates the nesting onto the
+                       constructors' flat kwargs (MODEL_BLOCK_KEYS)
+                       and rejects unknown or misplaced keys;
                      optimizer = weight_decay (+ any extra AdamW kwargs);
                      lr = lr_base, bs_base, warmup_epochs (run sets
                        lr = lr_base * sqrt(bs / bs_base));
@@ -202,13 +235,15 @@ class EmulatorExperiment:
     self.data       = data
     self.train_args = train_args
     self.model_cls  = model_cls
-    # display name + IA design, overwritten by from_config with the
-    # YAML's composed name/ia. The direct-construction fallback infers
-    # the design from the class's factored flag ("nla" is the one
-    # implemented design; from_config sets the real choice).
+    # display name + IA design + architecture, overwritten by
+    # from_config with the YAML's composed name/ia. The
+    # direct-construction fallbacks: the design comes from the class's
+    # factored flag ("nla" is the one implemented design); arch stays
+    # None, which skips build_specs' head-block-vs-architecture check.
     self.model_name = model_cls.__name__.lower()
     self.ia = ("nla" if getattr(model_cls, "factored", False)
                else None)
+    self.arch = None
     self.opt_cls    = opt_cls
     self.sched_cls  = sched_cls
     self.probe      = probe
@@ -301,20 +336,30 @@ class EmulatorExperiment:
         f"({' | '.join(sorted(ias))}; omit it for the plain emulator)")
     # activation precedence, resolved once here: an explicit caller choice
     # (the drivers' --activation flag; they pass None when the flag is
-    # absent) wins over the YAML's train_args.model.activation, which wins
-    # over the "H" default. build_specs strips the key from the model
-    # block (like name, it is not a model-constructor kwarg).
+    # absent) wins over the YAML's model.activation block, which wins
+    # over the "H" default. The block nests {type, n_gates}; a bare
+    # string (activation: H) is accepted as shorthand for the type.
+    # build_specs consumes n_gates and drops the block (it is not a
+    # model-constructor kwarg).
     if kwargs.get("activation") is None:
-      kwargs["activation"] = str(ta["model"].get("activation", "H"))
+      act_blk = ta["model"].get("activation")
+      if isinstance(act_blk, dict):
+        kwargs["activation"] = str(act_blk.get("type", "H"))
+      elif act_blk is not None:
+        kwargs["activation"] = str(act_blk)
+      else:
+        kwargs["activation"] = "H"
     exp = cls(data=cfg["data"], train_args=ta,
               model_cls=models[(name, ia)],
               raw_train_args=cfg["train_args"], **kwargs)
     # the composed display name (run_tag / the banner / file names):
     # the architecture, suffixed by the IA design when one is layered
     # (resmlp_nla, rescnn_nla). exp.ia drives the factored-design
-    # lookups (IA_DESIGNS) in build_geometry / build_specs.
+    # lookups (IA_DESIGNS) and exp.arch the head-block validation
+    # (ARCH_HEAD) in build_geometry / build_specs.
     exp.model_name = name if ia is None else f"{name}_{ia}"
-    exp.ia = ia
+    exp.ia   = ia
+    exp.arch = name
     return exp
 
   @classmethod
@@ -557,21 +602,56 @@ class EmulatorExperiment:
       the keyed spec dict run_emulator consumes as **specs.
     """
     train_args = self.train_args if train_args is None else train_args
-    # drop the non-constructor keys before the spread: name / ia pick
-    # the class (from_config resolved them), activation was already
-    # resolved by from_config (re-reading it here would let the YAML
-    # overrule an explicit --activation), and n_gates feeds
-    # make_activation below -- none is a model-constructor arg
-    # (from_config reads without popping, a suggest_train_args result
-    # still carries the scalars).
+    # Translate the nested YAML model block into the constructors'
+    # flat kwargs (MODEL_BLOCK_KEYS). name / ia picked the class
+    # (from_config resolved them); the activation type was resolved by
+    # from_config too (re-reading it here would let the YAML overrule
+    # an explicit --activation), so only its n_gates is consumed here;
+    # compile_mode passes through (make_model strips it). Everything
+    # else must be one of the component sub-blocks. A head block for a
+    # head this architecture does not have is IGNORED, not an error:
+    # keeping cnn: and trf: both configured lets a run switch
+    # architectures by changing name: alone. Unknown keys -- top-level
+    # or inside the ACTIVE blocks -- still raise, so a misspelled knob
+    # that would affect the run fails loudly.
     ta = dict(train_args)
     model_opts = {}
     n_gates = 3
-    for k, v in ta["model"].items():
-      if k == "n_gates":
-        n_gates = int(v)
-      elif k not in ("name", "ia", "activation"):
-        model_opts[k] = v
+    head = ARCH_HEAD.get(self.arch) if self.arch is not None else None
+    for key, sub in ta["model"].items():
+      if key in ("name", "ia"):
+        continue
+      if key == "activation":
+        if isinstance(sub, dict) and "n_gates" in sub:
+          n_gates = int(sub["n_gates"])
+        continue
+      if key == "compile_mode":
+        model_opts["compile_mode"] = sub
+        continue
+      if key in MODEL_BLOCK_KEYS:
+        # skip the inactive head's block entirely (its contents are
+        # not even validated -- a stale key in a block that cannot
+        # affect this run should not stop it). With arch unknown
+        # (direct construction) every present block is translated.
+        if (self.arch is not None and key != "mlp"
+            and key != head):
+          continue
+        table = MODEL_BLOCK_KEYS[key]
+        for k2, v2 in sub.items():
+          if k2 not in table:
+            raise ValueError(
+              f"unknown key model.{key}.{k2}; allowed: "
+              f"{' / '.join(sorted(table))}")
+          model_opts[table[k2]] = v2
+        continue
+      raise ValueError(
+        f"unknown model key {key!r}; the model block nests its "
+        "knobs: name / ia / mlp / activation / cnn / trf / "
+        "compile_mode")
+    if "int_dim_res" not in model_opts:
+      raise ValueError(
+        "the model.mlp block (width, n_blocks) is required -- every "
+        "architecture is built on the ResMLP trunk")
     ta["model"] = model_opts
 
     # build_run_specs (training.py): turn the train_args sub-blocks into the
@@ -588,7 +668,8 @@ class EmulatorExperiment:
     # factory act(dim) -> nn.Module (the paper's H, or a Power / Gated /
     # GatedPower variant). A callable, so it cannot live in the YAML; inject
     # it into the ResBlock options (setdefault keeps config-set block_opts).
-    # n_gates (YAML model.n_gates, default 3) sizes the multi-gate families.
+    # n_gates (YAML model.activation.n_gates, default 3) sizes the
+    # multi-gate families.
     specs["model_opts"].setdefault(
       "block_opts", {})["act"] = make_activation(self.activation,
                                                  n_gates=n_gates)
@@ -655,14 +736,16 @@ class EmulatorExperiment:
       nepochs=train_args["nepochs"],
       bs=train_args["bs"],
       loss_mode=train_args.get("loss_mode", "sqrt"),
-      # two-phase schedule (trunk-then-head, rescnn + ia nla): epochs of
-      # pure-trunk training before the trunk freezes and the head
-      # learns the residual; 0 / absent = ordinary joint training.
-      # The optional head block overrides the head pass's objective
-      # (lr_base / loss_mode / trim / focus) -- by the handoff the
-      # trunk has absorbed most outliers, so the head may want e.g.
-      # loss_mode chi2 with no trim.
+      # two-phase schedule (trunk-then-head, factored conv/TRF heads):
+      # epochs of pure-trunk training before the trunk freezes and the
+      # head learns the residual; 0 / absent = ordinary joint training.
+      # The symmetric trunk: / head: blocks override each pass's
+      # objective (lr_base / loss_mode / trim / focus) over the shared
+      # top-level defaults -- by the handoff the trunk has absorbed
+      # most outliers, so the head may want e.g. loss_mode chi2 with
+      # no trim.
       trunk_epochs=train_args.get("trunk_epochs", 0),
+      trunk_opts=train_args.get("trunk"),
       head_opts=train_args.get("head"),
       thresholds=self.thresholds,
       use_amp=self.use_amp,

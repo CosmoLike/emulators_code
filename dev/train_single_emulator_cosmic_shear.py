@@ -46,11 +46,14 @@
 #    intrinsic-alignment design layered on it, omit for plain or `nla` --
 #    the model emits three templates the loss combines as
 #    K0 + A1 K1 + A1^2 K2, so the LSST_A1_1 amplitude never enters the
-#    network; then kwargs: int_dim_res, n_blocks; for rescnn kernel_size /
-#    n_blocks_cnn (the bins are the conv channels); for restrf int_dim_trf /
-#    n_heads / n_blocks_trf / n_mlp_blocks; gate_init for both heads), optional
-#    trunk_epochs (two-phase schedule) + head (head-phase overrides:
-#    lr_base / loss_mode / trim / focus), optimizer (weight_decay),
+#    network; then one NESTED sub-block per component: mlp {width,
+#    n_blocks} = the trunk; activation {type, n_gates}; cnn {kernel_size,
+#    n_blocks, gate_init} for rescnn (the bins are the conv channels);
+#    trf {width, n_heads, n_blocks, n_mlp_blocks, gate_init} for restrf),
+#    optional
+#    trunk_epochs (two-phase schedule) + symmetric trunk / head blocks
+#    (per-phase overrides over the shared defaults: lr_base / loss_mode /
+#    trim / focus), optimizer (weight_decay),
 #    lr (lr_base, bs_base, warmup_epochs), scheduler (mode, patience, factor),
 #    trim / focus (robustness schedules).
 #

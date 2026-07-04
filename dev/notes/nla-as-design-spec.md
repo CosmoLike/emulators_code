@@ -47,6 +47,34 @@ improvement (0.381 -> 0.346), not a zero A1 correlation. Expect the
 same shape for TATT: amplitudes stay in the hardness ranking while
 their prior stops costing coverage.**
 
+**NESTED MODEL-BLOCK SCHEMA (2026-07-04e, user: "I dont like all
+hyperparameters on the same level").** The YAML model block now nests
+one sub-block per component, so keys need no suffixes:
+  model: {name, ia, mlp: {width, n_blocks}, activation: {type,
+  n_gates} (bare string accepted as type shorthand), cnn:
+  {kernel_size, n_blocks, gate_init}, trf: {width, n_blocks,
+  n_mlp_blocks, gate_init}, compile_mode}.
+Constructors KEEP flat kwargs (internal API); build_specs translates
+via MODEL_BLOCK_KEYS tables (mlp.width -> int_dim_res, cnn.n_blocks ->
+n_blocks_cnn, trf.width -> int_dim_trf, ...). Validation: unknown
+top-level keys, unknown keys inside the ACTIVE blocks, old FLAT keys,
+and a missing mlp block raise loudly -- but the INACTIVE head's block
+is silently IGNORED (contents not even validated), per the user:
+keeping cnn: and trf: both configured lets a run switch architectures
+by changing name: alone (ARCH_HEAD: resmlp->None, rescnn->cnn,
+restrf->trf; exp.arch set by from_config, None = direct construction
+= every present block translated). n_heads IS a documented trf: hyperparameter (user
+explicitly corrected an earlier removal: "dont hardwire - make it a
+hyperparameter"; default 4). The multi-head lesson stands: H is free
+(the H-fold pattern count is exactly canceled by d/H-narrow dot
+products; only the (B,H,G,G) score tensor grows, megabytes) -- it
+tunes inductive bias (how many parallel in-what-respect attention
+patterns), not capacity. gate_init lesson (same session): with the zero-init
+identity head, 0.1 is a SOFT-START BRAKE only (under Adam the
+correction ramps ~10x slower in output units; gate=0 is a true
+deadlock -- gate grad prop to corr=0, head grad prop to gate); for
+short phase-2 runs gate_init 1.0 is the better default to try.
+
 **CONV HEAD REDESIGNED: BINS-AS-CHANNELS (2026-07-04d, user: "CNN is
 too slow... remove channels key").** The channels knob, CNNBlock, and
 TemplateMixCNNBlock are DELETED. ResCNN's head is now: theta-order dv
@@ -99,12 +127,16 @@ DELETED -- templates-as-conv-channels is now THE TemplateResCNN head
 only matters at tiny N). Zero-init target is always the mix block's
 collapse conv (the channels==1 Identity edge case is gone). A stale
 `template_mix:` YAML key now raises TypeError (unexpected kwarg).
-(2) head_lr_base REPLACED by a unified train_args.head block of
-head-phase overrides: lr_base / loss_mode / trim / focus (trim+focus
-are FULL replacement blocks incl. kappa, restarting at the head
-phase's epoch 1; rationale: post-handoff there are few outliers, so
-e.g. loss_mode chi2 + no trim). head: without trunk_epochs>0 raises
-(silent-no-op trap). run_emulator signature: trunk_epochs, head_opts.
+(2) head_lr_base REPLACED by per-phase override blocks, made SYMMETRIC
+2026-07-04f (user: "this should be symmetric"): the top-level
+loss_mode / lr / trim / focus are the SHARED DEFAULTS; train_args
+trunk: (phase 1) and head: (phase 2) each override lr_base /
+loss_mode / trim / focus for their own pass (trim+focus are FULL
+replacement blocks incl. kappa, restarting at the pass's epoch 1;
+rationale for head: post-handoff there are few outliers, so e.g.
+loss_mode chi2 + no trim). Either block without trunk_epochs>0 raises
+(silent-no-op trap). run_emulator signature: trunk_epochs, trunk_opts,
+head_opts.
 
 **CONFIG SCHEME REDESIGN (2026-07-04, user: "this naming is bad").**
 train_args.model.name is now the ARCHITECTURE ONLY (resmlp | rescnn);

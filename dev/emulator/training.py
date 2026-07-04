@@ -799,7 +799,7 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                  sched_opts=None, trim_opts=None, focus_opts=None,
                  thresholds=None, gpu_mem_gb=16, use_amp=False,
                  silent=False, device='gpu', seed=0,
-                 trunk_epochs=0, head_opts=None):
+                 trunk_epochs=0, trunk_opts=None, head_opts=None):
   """
   One training run; model, optimizer, schedule auto-built.
 
@@ -862,19 +862,24 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                    the zero-init head starts as an exact identity,
                    so the handoff is loss-continuous). 0 (default)
                    = ordinary joint training.
-    head_opts    = optional head-phase overrides (two-phase runs
-                   only; needs trunk_epochs > 0). By the handoff
-                   the trunk has absorbed most outliers, so the
-                   head phase may want a different objective. Keys
-                   (each absent -> the main value is reused):
-                     "lr_base"   -> phase-2 base lr (sqrt rule);
-                     "loss_mode" -> phase-2 loss transform;
-                     "trim"      -> phase-2 trim schedule, a FULL
-                       replacement block (its hold/anneal count
-                       from the phase's own epoch 1);
-                     "focus"     -> phase-2 focus schedule, ditto
-                       (include kappa -- no merge with the main
-                       block).
+    trunk_opts   = optional trunk-phase (phase 1) overrides;
+    head_opts    = optional head-phase (phase 2) overrides.
+                   Two symmetric blocks (two-phase runs only; need
+                   trunk_epochs > 0): the top-level loss_mode /
+                   lr / trim / focus are the shared defaults, and
+                   each phase's block overrides them for its own
+                   pass. (Typical use: by the handoff the trunk
+                   has absorbed most outliers, so the head phase
+                   wants a different objective.) Keys, each
+                   absent -> the main value is reused:
+                     "lr_base"   -> the pass's base lr (sqrt rule);
+                     "loss_mode" -> the pass's loss transform;
+                     "trim"      -> the pass's trim schedule, a
+                       FULL replacement block (its hold/anneal
+                       count from the pass's own epoch 1);
+                     "focus"     -> the pass's focus schedule,
+                       ditto (include kappa -- no merge with the
+                       main block).
 
   Returns:
     model        = trained network, restored to the best frac>0.2
@@ -890,11 +895,11 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     raise ValueError(
       f"trunk_epochs ({trunk_epochs}) must be < nepochs "
       f"({nepochs}): the head needs the remaining epochs")
-  if head_opts and trunk_epochs == 0:
+  if (trunk_opts or head_opts) and trunk_epochs == 0:
     raise ValueError(
-      "head-phase overrides (the train_args.head block) need "
-      "trunk_epochs > 0 -- without the two-phase schedule they "
-      "would silently do nothing")
+      "per-phase overrides (the train_args trunk: / head: blocks) "
+      "need trunk_epochs > 0 -- without the two-phase schedule "
+      "they would silently do nothing")
 
   if model_opts is None:
     model_opts = {"cls": ResMLP,
@@ -1033,32 +1038,37 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     if phase is not None:
       model.set_train_phase(phase)
 
-    # each pass restarts the lr at its base (never the other phase's
-    # decayed floor). The head phase trains a fresh zero-init
-    # subnetwork, so the full base + warmup is the right default --
-    # but by the handoff the trunk has absorbed most outliers, so
-    # head_opts may override the objective for that pass: a cooler
-    # lr_base (same sqrt-batch rule), another loss_mode, and full
-    # replacement trim / focus schedules (each restarts at the
-    # phase's own epoch 1, like the main ones do per pass).
+    # per-pass knob resolution: each pass restarts the lr at its base
+    # (never the other phase's decayed floor) and falls back to the
+    # main loss_mode / trim / focus; the SYMMETRIC trunk: / head:
+    # blocks override them for their own pass -- a different lr_base
+    # (same sqrt-batch rule), another loss_mode, and full-replacement
+    # trim / focus schedules (each restarts at the pass's own epoch 1,
+    # like the main ones do per pass).
+    phase_opts = None
+    if phase == "trunk":
+      phase_opts = trunk_opts
+    elif phase == "head":
+      phase_opts = head_opts
     lr_pass    = learning_rate
     mode_pass  = loss_mode
     trim_pass  = trim_opts
     focus_pass = focus_opts
-    if phase == "head" and head_opts:
-      if "lr_base" in head_opts:
-        lr_pass = (head_opts["lr_base"]
+    if phase_opts:
+      if "lr_base" in phase_opts:
+        lr_pass = (phase_opts["lr_base"]
                    * (bs / lr_opts["bs_base"]) ** 0.5)
-      mode_pass  = head_opts.get("loss_mode", loss_mode)
-      trim_pass  = head_opts.get("trim", trim_opts)
-      focus_pass = head_opts.get("focus", focus_opts)
+      mode_pass  = phase_opts.get("loss_mode", loss_mode)
+      trim_pass  = phase_opts.get("trim", trim_opts)
+      focus_pass = phase_opts.get("focus", focus_opts)
     if phase is not None and not silent:
-      over = []
+      noted = []
       if trim_pass is not trim_opts:
-        over.append("trim")
+        noted.append("trim")
       if focus_pass is not focus_opts:
-        over.append("focus")
-      tail = f"  [head overrides: {', '.join(over)}]" if over else ""
+        noted.append("focus")
+      tail = (f"  [{phase} overrides: {', '.join(noted)}]"
+              if noted else "")
       print(f"phase '{phase}': {n_pass} epochs, lr restarts "
             f"at {lr_pass:.2e} (+ {wmupe}-epoch warmup), "
             f"loss_mode {mode_pass}{tail}")
