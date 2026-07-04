@@ -118,6 +118,44 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**LAUNCH-BOUND FIX: COMPILED FWD+LOSS + PRE-SHUFFLE (2026-07-04t;
+user approved option 5 after the MCMC-contention incident showed
+epochs are launch-bound, +50% under CPU load).** Diagnosis recap: a
+tiny model's step is ~40 CPU-launched micro-kernels (model fwd
+replay + ~30 eager loss fwd/bwd kernels + fused opt + gathers);
+epoch time = CPU dispatch, not GPU compute; a faster GPU (user's
+production H200) makes this WORSE relatively. Three changes: (1)
+CosmolikeChi2 reduction rewritten STATIC-SHAPE and factored into
+_reduce (sort + zero-weight prefix mask == topk exactly -- same
+kept set, weighted mean permutation-invariant, grads identical;
+topk's k anneals per epoch and would recompile/recapture); trim /
+focus now accept 0-dim tensors (float guards recompile per value;
+k computed in float64 so round parity with python holds);
+ElementWeightedChi2 deduped onto _reduce; ALL other losses (IA,
+Rescaled, PCE) delegate to the base -> inherit free. (2)
+training_loop_batched builds _fwd_loss(xb, yb, trim_t, focus_t) =
+autocast(model) + lossfn.loss, compiled with the SAME mode
+make_model used (stashed as model.emul_compile_mode attr; off-CUDA
+= same function uncompiled -- one code path); per-epoch anneal
+fill_()s into 0-dim device tensors. (3) pre-shuffle per chunk (Cc =
+Cc[bp] once) -> every batch is a contiguous slice view: kills 3
+gather launches/step (factored path gathered Cc TWICE), one
+transient chunk copy (~780MB @ 250k; bounded by chunk not N_train
+-- at 10M dvs the pool streams in budget-sized chunks and the
+transient is unchanged; what scales is H2D traffic -> the 10M-era
+optimization is prefetch overlap, not graphs). ESTIMATES (accounting
+not measurement): ~40 -> ~8 launches/step, quiet trunk epochs 0.75
+-> ~0.4-0.55s, contention sensitivity /3-5; full-step CUDA graph
+(option 4, NOT built) would buy ~15-20% more but needs capturable
+optimizer + rewind copy_ semantics -- revisit after measuring.
+test_fwdloss_compile.py (8 checks: old==new reduction to 2e-6,
+tensor==float exact, k-parity sweep, fullgraph compile with
+error_on_recompile proving one graph across annealed values, grads
+flow, loop integration incl. needs_params). Full battery green.
+NOTE fused AdamW was ALREADY auto-injected on CUDA in
+make_optimizer (my tier-1 suggestion was pre-built); YAML fused:
+false is silently overridden (setdefault would fix if ever wanted).
+
 **HEAD FOCUS ENABLED (2026-07-04s; user: "why CNN has no focus? by
 the handoff there are very few outliers -- focus could help where
 chi2 is ~1 to 10").** The all-zero head focus block was a

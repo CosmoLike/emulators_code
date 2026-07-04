@@ -189,29 +189,77 @@ class CosmolikeChi2:
                > 0 -> weight each sample by
                (c/(c+focus_scale))**focus (detached), up-weighting
                hard points so the optimizer keeps chasing the tail.
-               Annealed.
+               Annealed. Float or 0-dim tensor (see _reduce).
       focus_scale = chi2 scale where the focal weight turns on;
                     hardness h = c/(c+focus_scale) crosses 0.5 at
                     c = focus_scale.
     Returns:
-      a scalar loss tensor (the batch mean of the transform).
+      a scalar loss tensor (the trimmed, focal-weighted mean).
     """
     c = self.chi2(pred=pred, target=target)   # per-sample chi2, (B,)
-    if trim > 0.0:
-      # keep-count k: c.numel() = batch size B (a shape read, no
-      # GPU sync); (1.0 - trim) is the fraction kept (0.95 at
-      # trim=0.05); round/int give an integer; max(1, ...) floors
-      # it at 1, so a tiny batch never keeps zero (topk(c, 0) or an
-      # empty-tensor mean would break).
-      k = max(1, int(round((1.0 - trim) * c.numel())))
-      # topk with largest=False returns the k smallest chi2 values
-      # (flipping the default k-largest): the best-fit kept samples,
-      # dropping the worst `trim` fraction. Of its (values, indices)
-      # named tuple, `c, _ = ...` keeps values, discards indices via
-      # `_`. Gradients flow through the kept values; only which
-      # samples are kept is non-differentiable.
-      c, _ = torch.topk(c, k, largest=False)
-    
+    return self._reduce(c=c, mode=mode, trim=trim, focus=focus,
+                        focus_scale=focus_scale)
+
+  def _reduce(self, c, mode, trim, focus, focus_scale):
+    """
+    Per-sample chi2 -> scalar loss: trim, transform, focal mean.
+    Shared by every loss variant (the subclasses change how c is
+    built, never how it is reduced).
+
+      c  (B,)                per-sample chi2
+         │  sort ascending          (static shape; see below)
+         ▼
+         │  keep = 1 for the first k entries, 0 after
+         │                          k = round((1-trim)*B), >= 1
+         ▼
+         │  v = mode transform      (chi2 | sqrt | sqrt_dchi2)
+         │  w = keep * (c/(c+focus_scale))**max(focus,0)  detached
+         ▼
+      loss = (w*v).sum() / (w.sum() + eps)
+
+    Why sort + a zero-weight prefix mask instead of topk(c, k):
+    the value is identical -- the kept set is the same k smallest
+    samples, and a weighted mean does not care about order -- but
+    topk's output shape depends on k, and k anneals every epoch.
+    Under torch.compile that would recompile (and re-capture CUDA
+    graphs) once per epoch; the sorted-mask form keeps every shape
+    fixed at B, so one compiled graph serves a whole annealed run.
+    For the same reason trim and focus accept 0-dim tensors: a
+    Python float is guarded by value (new value = recompile), a
+    tensor updates in place. Gradients match topk's exactly: the
+    dropped samples' terms are multiplied by 0, and sort is a
+    permutation (gradients pass straight through it).
+
+    Arguments:
+      c           = (B,) per-sample chi2.
+      mode        = "chi2" | "sqrt" | "sqrt_dchi2" (a static
+                    string: one specialization per mode).
+      trim        = worst fraction dropped (0 = none); float or
+                    0-dim tensor.
+      focus       = focal exponent gamma; float or 0-dim tensor
+                    (<= 0 -> plain mean, since h**0 = 1).
+      focus_scale = focal turn-on scale (float, fixed per run).
+
+    Returns:
+      a scalar loss tensor.
+    """
+    B = c.numel()
+    # ascending sort: the kept (smallest-chi2) samples come first,
+    # so the keep mask is a prefix. Sorting when trim = 0 changes
+    # nothing -- the weighted mean is permutation-invariant.
+    c = torch.sort(c).values
+    # keep-count k = round((1-trim)*B), floored at 1 so a tiny
+    # batch never keeps zero samples. Computed in float64 so a
+    # tensor trim rounds exactly as Python's round() did in the
+    # old topk path (both round half to even).
+    trim_t = torch.as_tensor(trim, dtype=torch.float64,
+                             device=c.device)
+    k = torch.clamp(torch.round((1.0 - trim_t) * B), min=1.0)
+    # prefix mask: position i is kept iff i < k. arange is int64,
+    # the comparison against the 0-dim float k broadcasts; cast to
+    # the chi2 dtype for the weighted mean.
+    keep = (torch.arange(B, device=c.device) < k).to(c.dtype)
+
     # per-sample transformed loss (not yet averaged)
     if mode == "chi2":
       v = c
@@ -230,9 +278,14 @@ class CosmolikeChi2:
     # a negative focus (the "off" sentinel) clamps to 0 and h**0 = 1
     # everywhere, collapsing the weighted mean to the plain mean --
     # no fragile "focus == 0" test or special case.
-    gamma = max(focus, 0.0)
+    gamma = torch.clamp(
+      torch.as_tensor(focus, dtype=c.dtype, device=c.device),
+      min=0.0)
     h = (c / (c + focus_scale)).detach()
-    w = h ** gamma
+    # the trim enters as a weight: dropped samples get w = 0, so
+    # both sums below run over the kept prefix only -- the same
+    # numerator and normalizer as the old topk form.
+    w = keep * h ** gamma
     # normalized weighted mean (stable scale as w anneals).
     return (w * v).sum() / (w.sum() + 1e-12)
 
@@ -523,24 +576,10 @@ class ElementWeightedChi2(CosmolikeChi2):
     # masked Mahalanobis (as in the base chi2) on the element-
     # weighted residual rs; contracts to per-sample chi2 (b,).
     c = torch.einsum("bi,ij,bj->b", rs, self.geom.Cinv_sq, rs)
-
-    if trim > 0.0:
-      k = max(1, int(round((1.0 - trim) * c.numel())))
-      c, _ = torch.topk(c, k, largest=False)
-
-    if mode == "chi2":
-      v = c
-    elif mode == "sqrt":
-      v = torch.sqrt(c)
-    elif mode == "sqrt_dchi2":
-      v = torch.sqrt(1.0 + 2.0 * c) - 1.0
-    else:
-      raise ValueError(f"unknown loss mode: {mode}")
-
-    gamma = max(focus, 0.0)
-    h = (c / (c + focus_scale)).detach()
-    w = h ** gamma
-    return (w * v).sum() / (w.sum() + 1e-12)
+    # the reduction (trim / mode transform / focal mean) is the
+    # base class's, in its static-shape form -- see _reduce.
+    return self._reduce(c=c, mode=mode, trim=trim, focus=focus,
+                        focus_scale=focus_scale)
 
 
 def make_chi2(geom, rescale="none", param_geometry=None,

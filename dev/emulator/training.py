@@ -120,6 +120,13 @@ def make_model(model_opts, input_dim, output_dim, device):
               output_dim=output_dim, **extra).to(device)
   if device.type == "cuda" and compile_mode is not None:
     model = torch.compile(model, mode=compile_mode)
+    # record the mode as a plain attribute (reads reach through
+    # the wrapper): training_loop_batched compiles its combined
+    # forward+loss step the same way, so the loss math joins the
+    # model in one compiled graph instead of launching eagerly
+    # kernel by kernel (the training loop is launch-bound: a tiny
+    # model's epoch time is mostly the CPU dispatching kernels).
+    model.emul_compile_mode = compile_mode
   return model
 
 
@@ -684,6 +691,59 @@ def training_loop_batched(nepochs,
   # 1.0. Feeds the loss as focus_scale.
   kappa = focus_opts.get("kappa", 1.0)
 
+  # ---- the combined forward+loss step (the launch-bound fix) ----
+  # A tiny model's step is dozens of micro-kernels, each launched
+  # by the CPU; the GPU spends the step waiting on those launches
+  # (and on any CPU contention). Compiling the model ALONE (as
+  # make_model does) collapses its launches but leaves the loss --
+  # a dozen kernels forward, more backward, plus its per-step
+  # Python -- eager. Tracing model + loss together collapses the
+  # whole step to a few graph replays:
+  #
+  #    xb, yb  (contiguous batch views, see the pre-shuffle below)
+  #       │  model(xb)          under autocast, as before
+  #       ▼
+  #    pred
+  #       │  lossfn.loss(...)   static-shape reduction (_reduce)
+  #       ▼
+  #    scalar loss              one compiled graph for all of it
+  #
+  # Off-CUDA (or compile disabled) fwd_loss is this same function,
+  # simply not compiled -- one code path, two execution modes.
+  needs_p = getattr(lossfn, "needs_params", False)
+
+  def _fwd_loss(xb, yb, trim, focus):
+    # the model forward under autocast (unchanged semantics); the
+    # loss math stays outside it, in full precision.
+    with torch.autocast(device.type,
+                        dtype=amp_dtype,
+                        enabled=use_amp):
+      pred = model(xb)
+    if needs_p:
+      return lossfn.loss(pred=pred, target=yb,
+                         params_whitened=xb, mode=mode,
+                         trim=trim, focus=focus,
+                         focus_scale=kappa)
+    return lossfn.loss(pred, target=yb, mode=mode, trim=trim,
+                       focus=focus, focus_scale=kappa)
+
+  # compile with the same mode make_model used for the model (the
+  # attribute is absent off-CUDA or with compile disabled).
+  cmode = getattr(model, "emul_compile_mode", None)
+  if cmode is not None:
+    fwd_loss = torch.compile(_fwd_loss, mode=cmode)
+  else:
+    fwd_loss = _fwd_loss
+
+  # the annealed per-epoch loss scalars, as 0-dim device tensors:
+  # a compiled function guards on a Python float by value, so an
+  # annealing trim / focus passed as floats would recompile every
+  # epoch; a tensor updates in place (fill_ below) with no
+  # recompile, and keeps the compiled graph's shapes static (the
+  # loss's _reduce is built for tensor scalars).
+  trim_t  = torch.zeros((), device=device)
+  focus_t = torch.zeros((), device=device)
+
   # wall-clock timing for GPU comparison. eval_val's .item() below
   # syncs the GPU before each epoch's log line, so perf_counter around
   # the epoch measures real elapsed time. epoch 1 carries the one-time
@@ -718,6 +778,11 @@ def training_loop_batched(nepochs,
     # tail, not out-voted by the solved bulk. One per epoch.
     focus = anneal_value(epoch=epoch, opts=focus_opts)
 
+    # write this epoch's annealed values into the 0-dim tensors the
+    # compiled fwd_loss reads (in-place: no recompile, no realloc).
+    trim_t.fill_(rob)
+    focus_t.fill_(focus)
+
     # epoch training loss, accumulated on-device
     run_sum = torch.zeros((),
                           device=device,
@@ -728,7 +793,15 @@ def training_loop_batched(nepochs,
       rows = np.sort(perm[cs:cs+load])
       Cc  = load_C(rows)
       dvc = load_dv(rows)
+      # pre-shuffle once per chunk (the rows arrive sorted, for
+      # host-side read locality): applying the batch permutation
+      # here makes every step's batch a contiguous slice -- a free
+      # view, replacing the per-step gather kernels (the factored
+      # path gathered Cc twice and dvc once per step). Costs one
+      # transient chunk-sized copy on the GPU.
       bp = torch.randperm(Cc.shape[0], device=device)
+      Cc  = Cc[bp]
+      dvc = dvc[bp]
       # Drop the ragged last batch so every batch is one size.
       # This matters under torch.compile: it specializes per input
       # shape, and reduce-overhead (CUDA graphs) needs it fixed. bp
@@ -736,28 +809,7 @@ def training_loop_batched(nepochs,
       # data is permanently lost.
       n_full = (Cc.shape[0] // bs) * bs   # whole batches only
       for s in range(0, n_full, bs):
-        b = bp[s:s+bs]
-        with torch.autocast(device.type,
-                            dtype=amp_dtype,
-                            enabled=use_amp):
-          pred = model(Cc[b])
-
-        if getattr(lossfn, "needs_params", False):
-          loss = lossfn.loss(pred=pred,
-                             target=dvc[b],
-                             params_whitened=Cc[b],
-                             mode=mode,
-                             trim=rob,
-                             focus=focus,
-                             focus_scale=kappa)
-        else:
-            loss = lossfn.loss(pred,
-                               target=dvc[b],
-                               mode=mode,
-                               trim=rob,
-                               focus=focus,
-                               focus_scale=kappa)
-
+        loss = fwd_loss(Cc[s:s+bs], dvc[s:s+bs], trim_t, focus_t)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         # gradient-norm clipping (0 = off): rescale the full
@@ -769,8 +821,8 @@ def training_loop_batched(nepochs,
           nn.utils.clip_grad_norm_(model.parameters(),
                                    max_norm=clip)
         optimizer.step()
-        run_sum += loss.detach() * b.numel()
-        run_n   += b.numel()
+        run_sum += loss.detach() * bs
+        run_n   += bs
     train_loss = (run_sum / run_n).item()
     model.eval()
     median, mean, frac = eval_val(model=model,
