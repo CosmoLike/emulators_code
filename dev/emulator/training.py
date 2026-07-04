@@ -219,7 +219,7 @@ def build_run_specs(train_args, model_cls, opt_cls, sched_cls):
   Spreading **train_args["model"] (etc.) means this never has to
   know a class's kwargs: whatever serializable settings the YAML
   lists flow through (int_dim_res / n_blocks for ResMLP,
-  kernel_size / channels for ResCNN, ...). Each {...} / dict(...)
+  kernel_size / n_blocks_cnn for ResCNN, ...). Each {...} / dict(...)
   builds a new dict, never mutating the input mapping.
 
   Arguments:
@@ -966,7 +966,7 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
   # projection, the output projection, the final Affine) is an affine map
   # with no nonlinearity of its own -- it adds width, not shape, and the
   # output projection alone scales with 3*n_keep, dominating the total.
-  # The Linears inside ResBlock and the convs inside CNNBlock stay
+  # The Linears inside ResBlock and the head convs stay
   # counted: interleaved with activations, they ARE the nonlinear map.
   if not silent:
     n_total  = 0

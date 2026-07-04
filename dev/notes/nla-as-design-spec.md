@@ -47,6 +47,52 @@ improvement (0.381 -> 0.346), not a zero A1 correlation. Expect the
 same shape for TATT: amplitudes stay in the hardness ranking while
 their prior stops costing coverage.**
 
+**CONV HEAD REDESIGNED: BINS-AS-CHANNELS (2026-07-04d, user: "CNN is
+too slow... remove channels key").** The channels knob, CNNBlock, and
+TemplateMixCNNBlock are DELETED. ResCNN's head is now: theta-order dv
+-> pad_idx scatter into the padded (n_bins, max_bin) layout (same
+machinery as ResTRF; ResCNN/TemplateResCNN now carry needs_bins) ->
+n_blocks_cnn x [ONE Conv1d(n_bins -> n_bins, kernel_size) + act] ->
+gather -> W_df -> gate. TemplateResCNN: channels = the (template, bin)
+pairs, Conv1d(T*G -> T*G, k) -- cross-bin AND cross-template in one
+single kernel. Head hyperparameters are ONLY kernel_size +
+n_blocks_cnn. Why it kills the speed problem BY CONSTRUCTION: the old
+head expanded to C=16 filters ((3B, 16, 705) = 104 MB intermediates,
+bandwidth-bound); the new head's tensors never exceed the padded dv
+size ((B, 90, 26) = 7 MB at bs 768) -- no expansion exists to pay for.
+Physics: channel mixing couples different bins at like angular scales
+(up to per-bin mask offsets). Zero-init = the LAST conv (identity
+start; plain ResCNN now has it too; set_train_phase / two-phase stays
+on the Template variants only). Params per block: C^2*k + C (plain
+G=30: ~9.9k; nla T*G=90: ~89k at k=11). Old test files
+test_rescnn_nla/test_mix_and_phases superseded by test_rescnn_bins.
+
+**ResTRF BUILT (2026-07-04c, user-commissioned; 32 venv checks).**
+The bin-token transformer architecture, name: restrf (+ ia: nla ->
+TemplateResTRF). Gated correction appendix like rescnn (user: "lets
+try to maintain this... if it does not work we can think about trying
+the other way" -- the paper's main-path form is the fallback). Design:
+trunk -> W_fd theta order -> pad_idx scatter into the padded
+(n_bins, max_bin) layout (bin_sizes via build_shear_angle_map; the
+needs_bins capability flag makes build_geometry run it -- ini+n(z)
+only, no cosmolike) -> per-bin UNIQUE embed (BinLinear) -> n_blocks_trf
+x TRFBlock -> per-bin UNIQUE out (zero-init identity) -> gather ->
+W_df -> gate. TRFBlock = pre-LN attention across bins (Q/K/V/O SHARED,
+standard) + per-bin UNIQUE MLP stack (n_mlp_blocks deep) -- the user's
+two deviations from the textbook block; unique weights replace the
+positional encoding. ia: nla -> token features = the bin's segment
+from ALL 3 templates concatenated (T*max_bin -> int_dim_trf), the TRF
+analogue of templates-as-channels; A1 exactness untouched; per-template
+gates; set_train_phase -> trunk_epochs two-phase works. Knobs:
+int_dim_trf (divisible by n_heads), n_heads, n_blocks_trf,
+n_mlp_blocks, gate_init. conv_head flag RENAMED needs_geom (+ new
+needs_bins). PARAM NOTE: the head is ~200k at 30 bins/d32 (per-bin
+unique weights x 30 dominate -- embed/out/MLPs), vs ~3k for the conv
+head; compute still tiny (tokens (B,30,32), NOT bandwidth-bound).
+GOTCHA (test trap): pre-LN LayerNorm is shift-invariant per token, so
+a CONSTANT perturbation of one token is annihilated -- probe mixing
+with a random vector.
+
 **SIMPLIFICATIONS (2026-07-04b, user-driven):** (1) template_mix knob
 DELETED -- templates-as-conv-channels is now THE TemplateResCNN head
 (no fold path; user: "win-win", and the shared-kernel regularization

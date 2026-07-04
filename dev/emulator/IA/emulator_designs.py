@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 
 from ..activations import activation_fcn
-from ..emulator_designs_building_blocks import Affine, ResBlock
+from ..emulator_designs_building_blocks import (
+  Affine, ResBlock, BinLinear, TRFBlock)
 
 
 class NLATemplateMLP(nn.Module):
@@ -142,95 +143,41 @@ class TemplateMLP(nn.Module):
     return h.view(x.shape[0], self.n_templates, self.n_keep)
 
 
-class TemplateMixCNNBlock(nn.Module):
-  """
-  Template-mixing 1D-conv correction block: the n_templates axis is
-  the conv's channel axis, so one kernel reads all templates at each
-  theta and writes a correction for each -- (B, T, K) -> (B, T, K).
-
-  Why templates-as-channels (and not one kernel folded over a T*B
-  batch): folding makes every intermediate (T*B, channels, K) --
-  at T=3, bs 768, K=705, channels 16 that is ~100 MB per tensor, and
-  the head becomes memory-bandwidth-bound (the GPU spends its time
-  moving those tensors, not computing). Channels keep the
-  intermediates at (B, channels, K), a 3x traffic cut at identical
-  FLOPs, and the cross-template features are physically reasonable
-  (GG, GI, II are correlated correlation-function shapes along the
-  same theta axis -- the exact analogue of a conv reading RGB as 3
-  channels). The fold's only virtue was the shared-kernel
-  regularization, which matters at tiny N, not at the >=10^5-sample
-  training sets this package targets. Either way the factored
-  design's A1 exactness is untouched: it is a property of the loss
-  combine, and the head's output is still n_templates
-  amplitude-blind templates.
-
-  The mid activation is unconditional here: conv (T->channels) and
-  collapse (channels->T) are both linear convs, so without it they
-  fold into a single T->T kernel and the channels add nothing.
-
-  Arguments:
-    dim         = template length K (the activations' feature width;
-                  their per-element parameters broadcast over the
-                  channel axis, as in CNNBlock's act_mid).
-    n_templates = conv input/output channels (the template count).
-    kernel_size = kernel width; odd, so same-padding keeps K.
-    channels    = internal conv filters.
-    act         = activation factory act(dim) -> module, shared with
-                  the trunk (defaults to activation_fcn, the paper's
-                  H).
-  """
-  def __init__(self, dim, n_templates, kernel_size=11,
-               channels=16, act=activation_fcn):
-    super().__init__()
-    assert kernel_size % 2 == 1, (
-      "kernel_size must be odd so same-padding keeps the length")
-    pad = (kernel_size - 1) // 2
-    # templates in -> `channels` filters; length preserved.
-    self.conv     = nn.Conv1d(in_channels=n_templates,
-                              out_channels=channels,
-                              kernel_size=kernel_size,
-                              padding=pad)
-    self.act_mid  = act(dim)
-    # filters back to one correction per template (1x1 conv = a
-    # per-position weighted sum over channels).
-    self.collapse = nn.Conv1d(in_channels=channels,
-                              out_channels=n_templates,
-                              kernel_size=1)
-    self.act      = act(dim)
-
-  def forward(self, x):
-    """(B, n_templates, K) templates -> (B, n_templates, K) corrections."""
-    h = self.conv(x)              # (B, channels, K)
-    h = self.act_mid(h)           # keeps the two convs from folding
-    h = self.collapse(h)          # (B, n_templates, K)
-    return self.act(h)
-
-
 class TemplateResCNN(nn.Module):
   """
-  Factored IA emulator with a 1D-CNN correction head: the
-  TemplateMLP trunk emits n_templates whitened templates, then one
-  shared gated conv stack corrects each template's theta-local
-  structure before the loss combines them. The amplitude polynomial
-  is untouched (the loss still forms xi = sum_t c_t * template_t
-  from the appended raw amplitudes), so the correction inherits the
-  factored design's exactness in the amplitudes.
+  Factored IA emulator with a bins-as-channels 1D-CNN correction
+  head: the TemplateMLP trunk emits n_templates whitened templates,
+  then a single-kernel conv stack corrects them before the loss
+  combines them. The amplitude polynomial is untouched (the loss
+  still forms xi = sum_t c_t * template_t from the appended raw
+  amplitudes), so the correction inherits the factored design's
+  exactness in the amplitudes.
 
   Why correct the templates, not the combined xi: correcting after
   the combine would need the amplitudes in the network, surrendering
-  the exact generalization the factoring buys. The head is
-  TemplateMixCNNBlock: the templates are the conv's channel axis
-  (Conv1d T -> channels -> T in theta order), so the correction is
-  cross-template and every intermediate stays (B, channels, K) --
-  see that class for why this beats folding the templates into the
-  batch. The A1 exactness is untouched either way: it lives in the
+  the exact generalization the factoring buys.
+
+  The head is ResCNN's bins-as-channels design with the templates
+  joining the channel axis: each template's theta-order dv splits
+  into its (xi+/-, source-pair) bins, and the conv channels are the
+  (template, bin) pairs -- one Conv1d(n_templates*n_bins ->
+  n_templates*n_bins, kernel_size) slides a single kernel along
+  theta over everything at once, so the correction is theta-local,
+  cross-BIN, and cross-TEMPLATE in one map. No channel expansion:
+  the head's tensors never grow beyond the (padded) templates'
+  size, so the bandwidth wall the old expand-to-C-filters head hit
+  cannot occur by construction. Each block is one conv + one
+  activation; the only head hyperparameters are kernel_size and
+  n_blocks_cnn. The A1 exactness is untouched: it lives in the
   loss's combine, and the head emits amplitude-blind templates.
 
   The basis handling is ResCNN's: templates live in the full
   (cov-eigenbasis) whitening, which scrambles theta, so fixed
   buffers map each template to the diagonal view (theta order,
   per-element /sigma) for the conv and back (W_fd / W_df, see
-  ResCNN). Buffers, not live geometry calls in forward, so
+  ResCNN), and the fixed pad_idx buffer scatters each template into
+  the padded (n_bins, max_bin) layout and gathers the corrections
+  back. Buffers, not live geometry calls in forward, so
   torch.compile CUDA graphs stay safe. The gate is per template
   (n_templates scalars, not one): the templates carry very
   different whitened magnitudes (GG holds the center, II is a
@@ -254,19 +201,21 @@ class TemplateResCNN(nn.Module):
   only the residual, starting from the identity so the loss is
   continuous across the switch.
 
-  factored / conv_head are capability flags EmulatorExperiment
-  reads: factored picks the AmplitudeFactorGeometry input encoding
-  and the template-combining loss; conv_head injects geom (for the
-  basis buffers) and defaults compile_mode to "default"
-  (reduce-overhead's CUDA-graph capture trips on the gated
-  skip-add).
+  factored / needs_geom / needs_bins are capability flags
+  EmulatorExperiment reads: factored picks the
+  AmplitudeFactorGeometry input encoding and the template-combining
+  loss; needs_geom injects geom and defaults compile_mode to
+  "default" (reduce-overhead's CUDA-graph capture trips on the
+  gated skip-add); needs_bins runs build_shear_angle_map on the
+  data geometry (it attaches bin_sizes) before the model is built.
   """
-  factored  = True
-  conv_head = True
+  factored   = True
+  needs_geom = True
+  needs_bins = True
 
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, kernel_size=11,
-               channels=16, n_blocks=4, n_blocks_cnn=1,
+               n_blocks=4, n_blocks_cnn=1,
                gate_init=0.1, block_opts=None):
     """Build the template trunk, the conv head, the buffers.
 
@@ -280,12 +229,12 @@ class TemplateResCNN(nn.Module):
       n_templates  = templates to emit (3 NLA, 10 TATT); must match
                      the coeff_fn's length.
       int_dim_res  = internal residual width of the trunk.
-      geom         = full-whitening DataVectorGeometry; its evecs /
-                     sqrt_ev define the basis-change buffers.
-      kernel_size  = conv kernel width (odd); forwarded to CNNBlock.
-      channels     = conv filter count; forwarded to CNNBlock.
+      geom         = full-whitening DataVectorGeometry carrying
+                     bin_sizes; its evecs / sqrt_ev define the
+                     basis-change buffers.
+      kernel_size  = conv kernel width (odd, same-padded).
       n_blocks     = residual blocks in the trunk.
-      n_blocks_cnn = stacked CNN correction blocks (default 1).
+      n_blocks_cnn = stacked conv+activation correction blocks.
       gate_init    = initial per-template correction scale. Small
                      (default 0.1) to start near the pure trunk;
                      not 0 -- a 0 gate strands the CNN with no
@@ -298,6 +247,12 @@ class TemplateResCNN(nn.Module):
     super().__init__()
     if block_opts is None:
       block_opts = {}
+    assert kernel_size % 2 == 1, (
+      "kernel_size must be odd so same-padding keeps the length")
+    assert hasattr(geom, "bin_sizes"), (
+      "TemplateResCNN needs geom.bin_sizes -- run "
+      "build_shear_angle_map(geom) first (EmulatorExperiment does "
+      "this for models with the needs_bins flag)")
     self.n_keep      = output_dim
     self.n_templates = n_templates
     # n_in = real input width: drop the n_amps amplitude columns.
@@ -313,38 +268,56 @@ class TemplateResCNN(nn.Module):
     layers.append(Affine())
     self.model = nn.Sequential(*layers)
 
-    # conv head: template-mixing blocks (templates as conv channels;
-    # see TemplateMixCNNBlock for why). Takes the trunk's activation
-    # so head and trunk share one family.
+    # the bin split: per-bin kept counts, contiguous in theta order,
+    # and the fixed scatter/gather index into the padded layout (bin
+    # g's j-th entry at g*max_bin + j), applied per template.
+    sizes = []
+    for s in geom.bin_sizes:
+      sizes.append(int(s))
+    self.n_bins  = len(sizes)
+    self.max_bin = max(sizes)
+    pos = []
+    for g in range(self.n_bins):
+      for j in range(sizes[g]):
+        pos.append(g * self.max_bin + j)
+    self.register_buffer(
+      "pad_idx", torch.tensor(pos, dtype=torch.long))
+
+    # the head: n_blocks_cnn x (one conv + one activation), with the
+    # (template, bin) pairs as the channels -- a single kernel over
+    # everything (see the class docstring). Takes the trunk's
+    # activation so head and trunk share one family; act(max_bin)
+    # gives per-position parameters, broadcast over the channels.
     cnn_act = block_opts.get("act", activation_fcn)
-    cnn = []
+    pad = (kernel_size - 1) // 2
+    n_ch = n_templates * self.n_bins
+    convs, acts = [], []
     for _ in range(n_blocks_cnn):
-      cnn.append(TemplateMixCNNBlock(output_dim,
-                                     n_templates=n_templates,
-                                     kernel_size=kernel_size,
-                                     channels=channels,
-                                     act=cnn_act))
-    self.cnn = nn.ModuleList(cnn)
+      convs.append(nn.Conv1d(in_channels=n_ch,
+                             out_channels=n_ch,
+                             kernel_size=kernel_size,
+                             padding=pad))
+      acts.append(cnn_act(self.max_bin))
+    self.convs = nn.ModuleList(convs)
+    self.acts  = nn.ModuleList(acts)
 
     # one learnable gate per template, (n_templates, 1) so it
     # broadcasts over (B, n_templates, n_keep).
     self.gate = nn.Parameter(
       torch.full((n_templates, 1), float(gate_init)))
 
-    # Zero-init the LAST block's output layer, so the head starts as
-    # an exact identity on the model output: its final activation is
-    # H(x) = gate(x)*x with H(0) = 0, so a zeroed output layer gives
-    # corr = 0 and out = trunk exactly -- no random-weight
-    # perturbation at epoch 1 (or at a phase handoff). Gradients
-    # still reach the zeroed layer (d corr/d w depends on its INPUT,
-    # not its weights), so it grows from 0 as soon as a correction
-    # helps; the earlier blocks wake up one step later, once the
-    # zeroed layer is nonzero. The standard zero-init-residual-
-    # branch trick. Only the last block is zeroed -- zeroing all
-    # would kill every gradient path.
-    last = self.cnn[-1]
-    nn.init.zeros_(last.collapse.weight)
-    nn.init.zeros_(last.collapse.bias)
+    # Zero-init the LAST conv, so the head starts as an exact
+    # identity on the model output: the activation maps 0 -> 0, so a
+    # zeroed conv gives corr = 0 and out = trunk exactly -- no
+    # random-weight perturbation at epoch 1 (or at a phase handoff).
+    # Gradients still reach the zeroed conv (d corr/d w depends on
+    # its INPUT, not its weights, times the nonzero gate), so it
+    # grows from 0 as soon as a correction helps; earlier blocks
+    # wake up one step later. The standard zero-init-residual-branch
+    # trick. Only the last conv is zeroed -- zeroing all would kill
+    # every gradient path.
+    nn.init.zeros_(self.convs[-1].weight)
+    nn.init.zeros_(self.convs[-1].bias)
 
     # training phase, set by set_train_phase: "joint" (default,
     # everything trains), "trunk" (head frozen AND bypassed -- the
@@ -393,7 +366,9 @@ class TemplateResCNN(nn.Module):
     head_on  = phase in ("joint", "head")
     for p in self.model.parameters():
       p.requires_grad_(trunk_on)
-    for p in self.cnn.parameters():
+    for p in self.convs.parameters():
+      p.requires_grad_(head_on)
+    for p in self.acts.parameters():
       p.requires_grad_(head_on)
     self.gate.requires_grad_(head_on)
 
@@ -424,10 +399,263 @@ class TemplateResCNN(nn.Module):
     # so its output is known to be y -- skip the compute entirely.
     if self._phase == "trunk":
       return y
-    # templates as conv channels: the basis change broadcasts the
-    # matmul over the leading (B, T) axes, and every head
-    # intermediate stays (B, channels, n_keep).
+    # theta order per template (the matmul broadcasts over (B, T)),
+    # then scatter into the padded per-bin layout: the (template,
+    # bin) pairs become the conv channels.
     h = y @ self.W_fd                         # (B, T, n_keep) theta
-    for blk in self.cnn:
-      h = blk(h)                              # cross-template conv
-    return y + self.gate * (h @ self.W_df)
+    padded = h.new_zeros(B, self.n_templates,
+                         self.n_bins * self.max_bin)
+    padded[..., self.pad_idx] = h
+    c = padded.view(B, self.n_templates * self.n_bins,
+                    self.max_bin)
+    n = len(self.convs)
+    for i in range(n):
+      c = self.acts[i](self.convs[i](c))      # cross-bin+template
+    # gather the real entries back out of the padding (per
+    # template), return to the full-whitened basis, add through the
+    # per-template gate.
+    c = c.view(B, self.n_templates, self.n_bins * self.max_bin)
+    corr = c[..., self.pad_idx]               # (B, T, n_keep)
+    return y + self.gate * (corr @ self.W_df)
+
+
+class TemplateResTRF(nn.Module):
+  """
+  Factored IA emulator with a bin-token transformer correction
+  head: the TemplateMLP trunk emits n_templates whitened templates,
+  and a transformer whose TOKENS are the tomographic bins corrects
+  them before the loss combines them in closed form. The amplitude
+  polynomial is untouched, so the correction inherits the factored
+  design's exactness in the amplitudes (that exactness lives in the
+  loss's combine; the head only ever sees amplitude-blind
+  templates).
+
+  How the templates enter the head: token = bin, and each token's
+  feature vector is that bin's theta segment from ALL n_templates
+  templates concatenated -- the transformer analogue of the conv
+  head's channels choice (TemplateResCNN puts the (template, bin)
+  pairs on the channel axis). Corrections are therefore cross-template
+  AND cross-bin: attention shares information across bins, the
+  concatenated features share it across templates, and each bin's
+  own MLP stack (BinLinear; the deviation from the textbook shared
+  FFN, which also replaces the positional encoding) specializes
+  the result. Bins differ in length, so each is padded to max_bin
+  inside a fixed pad_idx buffer (scatter to pad, gather to unpad;
+  pad slots stay zero).
+
+  The head starts as an exact identity (zero-initialized output
+  projection; corr = 0), enabling the two-phase schedule
+  (train_args.trunk_epochs, orchestrated by run_emulator via
+  set_train_phase): first the trunk alone with the head bypassed
+  (pure-TemplateMLP cost), then the trunk frozen under no_grad
+  while the head learns only the residual, loss-continuous at the
+  handoff.
+
+  factored / needs_geom / needs_bins are capability flags
+  EmulatorExperiment reads: factored picks AmplitudeFactorGeometry
+  + the template-combining loss; needs_geom injects geom and
+  defaults compile_mode to "default"; needs_bins runs
+  build_shear_angle_map on the data geometry (it attaches
+  bin_sizes) before the model is built.
+  """
+  factored   = True
+  needs_geom = True
+  needs_bins = True
+
+  def __init__(self, input_dim, output_dim, n_amps,
+               n_templates, int_dim_res, geom, int_dim_trf=32,
+               n_heads=4, n_blocks=4, n_blocks_trf=1,
+               n_mlp_blocks=2, gate_init=0.1, block_opts=None):
+    """Build the template trunk, the TRF head, the buffers.
+
+    Arguments:
+      input_dim    = full encoded input width (non-amplitude
+                     features + the n_amps appended amplitudes).
+      output_dim   = one template's length (n_keep); n_templates
+                     are emitted and corrected.
+      n_amps       = appended amplitude columns to drop from the
+                     input (1 NLA, 3 TATT).
+      n_templates  = templates to emit (3 NLA, 10 TATT); must match
+                     the coeff_fn's length.
+      int_dim_res  = internal residual width of the trunk.
+      geom         = full-whitening DataVectorGeometry carrying
+                     bin_sizes; its evecs / sqrt_ev define the
+                     basis buffers.
+      int_dim_trf  = token embedding width (divisible by n_heads).
+      n_heads      = attention heads per TRFBlock.
+      n_blocks     = residual blocks in the trunk.
+      n_blocks_trf = stacked transformer blocks.
+      n_mlp_blocks = depth of each bin's private MLP stack inside
+                     every TRFBlock.
+      gate_init    = initial per-template correction scale (small,
+                     not 0 -- a 0 gate strands the head with no
+                     gradient).
+      block_opts   = ResBlock options (None -> {}); its "act" also
+                     reaches the TRF MLPs, so head and trunk share
+                     one activation family.
+    """
+    super().__init__()
+    if block_opts is None:
+      block_opts = {}
+    assert hasattr(geom, "bin_sizes"), (
+      "TemplateResTRF needs geom.bin_sizes -- run "
+      "build_shear_angle_map(geom) first (EmulatorExperiment does "
+      "this for models with the needs_bins flag)")
+    self.n_keep      = output_dim
+    self.n_templates = n_templates
+    # n_in = real input width: drop the n_amps amplitude columns.
+    self.n_in = input_dim - n_amps
+
+    # trunk: the TemplateMLP layer stack, emitting all templates in
+    # the full-whitened basis (well conditioned).
+    layers = [nn.Linear(in_features=self.n_in, out_features=int_dim_res)]
+    for _ in range(n_blocks):
+      layers.append(ResBlock(int_dim_res, **block_opts))
+    layers.append(nn.Linear(in_features=int_dim_res,
+                            out_features=n_templates * output_dim))
+    layers.append(Affine())
+    self.model = nn.Sequential(*layers)
+
+    # the bin split: per-bin kept counts, contiguous in theta order.
+    sizes = []
+    for s in geom.bin_sizes:
+      sizes.append(int(s))
+    self.n_bins  = len(sizes)
+    self.max_bin = max(sizes)
+    # pad_idx maps each kept theta-order position to its slot in the
+    # padded (n_bins, max_bin) layout (bin g's j-th entry at
+    # g*max_bin + j); one fixed buffer scatters to pad and gathers
+    # to unpad, per template.
+    pos = []
+    for g in range(self.n_bins):
+      for j in range(sizes[g]):
+        pos.append(g * self.max_bin + j)
+    self.register_buffer(
+      "pad_idx", torch.tensor(pos, dtype=torch.long))
+
+    # the head: token = bin, features = the bin's segment from all
+    # templates concatenated (n_templates * max_bin wide), embedded
+    # per bin, corrected by the TRF blocks, projected back per bin.
+    trf_act = block_opts.get("act", activation_fcn)
+    self.embed = BinLinear(self.n_bins,
+                           n_templates * self.max_bin, int_dim_trf)
+    trf = []
+    for _ in range(n_blocks_trf):
+      trf.append(TRFBlock(int_dim_trf, n_bins=self.n_bins,
+                          n_heads=n_heads,
+                          n_mlp_blocks=n_mlp_blocks,
+                          act=trf_act))
+    self.trf = nn.ModuleList(trf)
+    self.out = BinLinear(self.n_bins, int_dim_trf,
+                         n_templates * self.max_bin)
+
+    # zero-init the output projection: corr = 0 at init, so the
+    # model starts as its trunk exactly (identity start; the same
+    # wake-up chain as the conv heads -- out's weights get real
+    # gradients through the nonzero gate at step 1).
+    nn.init.zeros_(self.out.weight)
+    nn.init.zeros_(self.out.bias)
+
+    # one learnable gate per template, (n_templates, 1) so it
+    # broadcasts over (B, n_templates, n_keep).
+    self.gate = nn.Parameter(
+      torch.full((n_templates, 1), float(gate_init)))
+
+    # Frozen basis-change buffers, exactly ResCNN's: x @ W_fd maps
+    # full-whitened -> theta order (/sigma), x @ W_df maps back.
+    evecs   = geom.evecs.detach()
+    sqrt_ev = geom.sqrt_ev.detach()
+    sigma   = torch.sqrt(((evecs * sqrt_ev) ** 2).sum(1))
+    self.register_buffer(
+      "W_fd", (sqrt_ev[:, None] * evecs.t()) / sigma[None, :])
+    self.register_buffer(
+      "W_df", (sigma[:, None] * evecs) / sqrt_ev[None, :])
+
+    # training phase, set by set_train_phase (see TemplateResCNN):
+    # "joint" (default), "trunk" (head frozen AND bypassed), "head"
+    # (trunk frozen and run under no_grad).
+    self._phase = "joint"
+
+  def set_train_phase(self, phase):
+    """Switch the two-phase training mode (run_emulator calls this).
+
+    Identical contract to TemplateResCNN.set_train_phase: "joint"
+    trains everything; "trunk" freezes AND bypasses the head (pure
+    TemplateMLP cost; numerically a no-op thanks to the zero-init
+    identity); "head" freezes the trunk and runs it under no_grad,
+    so backward touches only the TRF head + gates.
+
+    Arguments:
+      phase = "joint" | "trunk" | "head".
+    """
+    if phase not in ("joint", "trunk", "head"):
+      raise ValueError(f"unknown train phase {phase!r}; "
+                       "use 'joint', 'trunk', or 'head'")
+    self._phase = phase
+    trunk_on = phase in ("joint", "trunk")
+    head_on  = phase in ("joint", "head")
+    for p in self.model.parameters():
+      p.requires_grad_(trunk_on)
+    for p in self.embed.parameters():
+      p.requires_grad_(head_on)
+    for p in self.trf.parameters():
+      p.requires_grad_(head_on)
+    for p in self.out.parameters():
+      p.requires_grad_(head_on)
+    self.gate.requires_grad_(head_on)
+
+  def forward(self, x):
+    """Map the non-amplitude params to TRF-corrected templates.
+
+    Arguments:
+      x = (B, input_dim) encoded parameters; the last n_amps
+          columns are the amplitudes (ignored here, read by the
+          loss), [:, :-n_amps] the whitened features.
+
+    Returns:
+      (B, n_templates, n_keep): the corrected whitened templates,
+      in coeff_fn order.
+    """
+    B = x.shape[0]
+    # trunk templates in the full-whitened basis. In the "head"
+    # phase the trunk is frozen, so skip building its autograd
+    # graph: no trunk activations stored, no trunk backward.
+    if self._phase == "head":
+      with torch.no_grad():
+        y = self.model(x[:, :self.n_in]).view(
+          B, self.n_templates, self.n_keep)  # (B, T, n_keep)
+    else:
+      y = self.model(x[:, :self.n_in]).view(
+        B, self.n_templates, self.n_keep)    # (B, T, n_keep)
+    # "trunk" phase: the head is frozen at its zero-init identity,
+    # so its output is known to be y -- skip the compute entirely.
+    if self._phase == "trunk":
+      return y
+
+    # theta order per template (the matmul broadcasts over (B, T)),
+    # then scatter into the padded per-bin layout.
+    h = y @ self.W_fd                        # (B, T, n_keep)
+    padded = h.new_zeros(B, self.n_templates,
+                         self.n_bins * self.max_bin)
+    padded[..., self.pad_idx] = h
+    # (B, T, G, max_bin) -> (B, G, T, max_bin) -> (B, G, T*max_bin):
+    # one token per bin, features = all templates' segments.
+    # permute reorders the axes without copying (a view with
+    # rearranged strides); the following reshape then materializes
+    # the merged trailing axis (permuted tensors are not
+    # contiguous, so reshape copies -- view would raise).
+    t = padded.view(B, self.n_templates, self.n_bins, self.max_bin)
+    t = t.permute(0, 2, 1, 3).reshape(
+      B, self.n_bins, self.n_templates * self.max_bin)
+    t = self.embed(t)                        # (B, G, int_dim_trf)
+    for blk in self.trf:
+      t = blk(t)                             # cross-bin attention
+    t = self.out(t)                          # (B, G, T*max_bin)
+    # invert the token packing: back to (B, T, G*max_bin), gather
+    # the real entries out of the padding, return to the
+    # full-whitened basis, add through the per-template gate.
+    t = t.view(B, self.n_bins, self.n_templates, self.max_bin)
+    t = t.permute(0, 2, 1, 3).reshape(
+      B, self.n_templates, self.n_bins * self.max_bin)
+    corr = t[..., self.pad_idx]              # (B, T, n_keep)
+    return y + self.gate * (corr @ self.W_df)

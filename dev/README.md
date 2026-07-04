@@ -6,7 +6,7 @@ A neural emulator that maps cosmological parameters to the masked cosmic-shear
 (`xi`) data vector, trained against the full-3x2pt chi2 from cosmolike.
 
 One line: raw dumps → stage → whiten params (input) and data vector (output) →
-ResMLP / ResCNN → chi2 loss → train. `EmulatorExperiment` wires it together; each
+ResMLP / ResCNN / ResTRF → chi2 loss → train. `EmulatorExperiment` wires it together; each
 driver varies one thing (one run, a tune, an `N_train` sweep, an activation
 bake-off).
 
@@ -53,8 +53,8 @@ emulator/                              the library (pure torch, except geometrie
   geometries_output.py                 OUTPUT geometry + chi2 covariance (imports cosmolike)
   analytics.py                         analytic xi rescaling R (optional preprocessing)
   activations.py                       learnable activations (H + variants)
-  emulator_designs_building_blocks.py  Affine, ResBlock, CNNBlock
-  emulator_designs.py                  ResMLP, ResCNN
+  emulator_designs_building_blocks.py  Affine, ResBlock, CNNBlock, BinLinear, TRFBlock
+  emulator_designs.py                  ResMLP, ResCNN, ResTRF
   loss_functions.py                    chi2 losses + make_chi2
   batching.py                          memory sizing + regime-aware data loaders
   training.py                          build model/opt/sched, training loop, run_emulator
@@ -101,7 +101,7 @@ cosmological parameters
    │   geometries_parameter.py   center, rotate, unit-scale          (whiten in)
    ▼
 whitened inputs
-   │   emulator_designs.py       ResMLP, or ResCNN
+   │   emulator_designs.py       ResMLP, ResCNN, or ResTRF
    ▼
 whitened data vector
    │   geometries_output.py      un-whiten + scatter to full length  (whiten out)
@@ -254,7 +254,7 @@ nothing branches on `isinstance`).
 output projection. `ResCNN` adds a 1D-CNN correction on top of the ResMLP trunk,
 acting in *theta order* so a convolution can exploit smoothness along the angular
 axis. Two orthogonal YAML keys pick the class: `train_args.model.name` is the
-architecture (`resmlp` | `rescnn`), and the separate `train_args.model.ia` key
+architecture (`resmlp` | `rescnn` | `restrf`), and the separate `train_args.model.ia` key
 layers a factored intrinsic-alignment design on it (omit for the plain
 emulator; `ia: nla` makes the model emit templates the loss combines in closed
 form, so the IA amplitude never enters the network — `TemplateMLP` for
@@ -424,7 +424,7 @@ python $D/bakeoff_activation_emulator_cosmic_shear.py \
 The YAML has two blocks: `data` (bare input filenames resolved under
 `--root/chains`, the cut/split, the cosmolike dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, and the `model` /
 `optimizer` / `lr` / `scheduler` / `trim` / `focus` sub-blocks). Pick the model
-with `train_args.model.name` (the architecture, `resmlp` | `rescnn`) plus the
+with `train_args.model.name` (the architecture, `resmlp` | `rescnn` | `restrf`) plus the
 optional `train_args.model.ia` key (the factored IA design, `nla`; omit for
 plain). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
@@ -635,14 +635,15 @@ The small `nn.Module`s the models are assembled from.
 
 - `Affine` — a learnable scalar scale + shift.
 - `ResBlock` — width-preserving residual block (n dense layers, each with a norm + activation factory, pre-activation skip).
-- `CNNBlock` — a 1D-conv correction head (expand to channels → mid-activation → 1×1 collapse).
+- `BinLinear` — G per-bin *unique* linear layers as one batched einsum; the unique weights also replace the positional encoding.
+- `TRFBlock` — one pre-LN transformer block whose tokens are the tomographic bins: shared-weight attention across bins + a per-bin unique MLP stack (the deviation from the textbook shared FFN).
 
 ### `emulator/emulator_designs.py` <a name="apx-emulator_designs"></a>
 
 The full networks.
 
 - `ResMLP` — input projection → residual blocks → output projection → Affine.
-- `ResCNN` — ResMLP trunk + a gated 1D-CNN correction acting in theta order, via fixed basis-change buffers `W_fd` / `W_df`:
+- `ResCNN` — ResMLP trunk + a gated bins-as-channels 1D-CNN correction in theta order (one `Conv1d(n_bins → n_bins, k)` kernel over the padded per-bin layout — theta-local and cross-bin, no channel expansion), via fixed basis-change buffers `W_fd` / `W_df` and the `pad_idx` scatter/gather:
 
 ```
   params ─▶ ResMLP trunk ─▶ y    (full-whitened, well-conditioned)
@@ -653,6 +654,8 @@ The full networks.
                             ▼
               y + gate · correction   ─▶   whitened data vector
 ```
+
+- `ResTRF` — ResMLP trunk + a gated bin-token transformer correction: the theta-order dv splits into its (xi+/-, source-pair) bins (`pad_idx` scatter/gather to a padded per-bin layout, `bin_sizes` from `build_shear_angle_map`), each bin is one token, `TRFBlock`s attend across bins, and a zero-initialized per-bin output projection makes the head an exact identity at epoch 1.
 
 ### `emulator/loss_functions.py` <a name="apx-loss_functions"></a>
 

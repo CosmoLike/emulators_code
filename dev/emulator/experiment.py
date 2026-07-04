@@ -32,8 +32,9 @@ from torch.optim import lr_scheduler
 from .data_staging import read_param_names, load_source, phys_cut_idx
 from .geometries_parameter import ParamGeometry, AmplitudeFactorGeometry
 from .loss_functions import make_chi2
-from .emulator_designs import ResMLP, ResCNN
-from .IA.emulator_designs import TemplateMLP, TemplateResCNN
+from .emulator_designs import ResMLP, ResCNN, ResTRF
+from .IA.emulator_designs import (TemplateMLP, TemplateResCNN,
+                                  TemplateResTRF)
 from .IA.loss_functions import TemplateFactoredChi2, nla_coeffs
 from .activations import make_activation
 from .training import (
@@ -43,7 +44,9 @@ from .training import (
 
 # (architecture, ia) -> model class. Two orthogonal YAML choices:
 # train_args.model.name picks the ARCHITECTURE (resmlp = residual MLP;
-# rescnn = + a theta-order 1D-CNN correction head), and the separate
+# rescnn = + a theta-order 1D-CNN correction head; restrf = + a
+# bin-token transformer correction head, attention across the
+# tomographic bins with per-bin unique MLPs), and the separate
 # train_args.model.ia key layers a factored intrinsic-alignment design
 # on it (absent/None = the plain emulator; "nla" = the model emits
 # three templates from the non-amplitude inputs and the loss combines
@@ -51,13 +54,17 @@ from .training import (
 # enters the network -- exact generalization in A1; "tatt" is reserved
 # for the 3-amplitude, 10-template design). The classes carry
 # capability flags build_geometry / build_specs read: factored
-# (AmplitudeFactorGeometry input + the template-combining loss) and
-# conv_head (geom injected for the fixed full<->theta basis buffers;
-# compile_mode defaulted to "default").
+# (AmplitudeFactorGeometry input + the template-combining loss),
+# needs_geom (geom injected for the fixed full<->theta basis buffers;
+# compile_mode defaulted to "default"), and needs_bins
+# (build_shear_angle_map run on the data geometry, attaching the
+# per-bin split the bin-token head needs).
 MODELS = {("resmlp", None):  ResMLP,
           ("rescnn", None):  ResCNN,
+          ("restrf", None):  ResTRF,
           ("resmlp", "nla"): TemplateMLP,
-          ("rescnn", "nla"): TemplateResCNN}
+          ("rescnn", "nla"): TemplateResCNN,
+          ("restrf", "nla"): TemplateResTRF}
 
 # the amplitude column the NLA design factors out of the network input.
 # LSST_A1_1 is the NLA amplitude (enters xi as a linear field
@@ -157,9 +164,10 @@ class EmulatorExperiment:
                        "nla"; the pair picks the class), "activation" /
                        "n_gates" (from_config / build_specs consume
                        these, see the `activation` argument below) plus
-                       int_dim_res, n_blocks, and for the conv-headed
-                       models kernel_size / channels / n_blocks_cnn /
-                       gate_init;
+                       int_dim_res, n_blocks, and the head knobs
+                       (rescnn: kernel_size / n_blocks_cnn; restrf:
+                       int_dim_trf / n_heads / n_blocks_trf /
+                       n_mlp_blocks; gate_init for both);
                      optimizer = weight_decay (+ any extra AdamW kwargs);
                      lr = lr_base, bs_base, warmup_epochs (run sets
                        lr = lr_base * sqrt(bs / bs_base));
@@ -494,6 +502,16 @@ class EmulatorExperiment:
       dataset=d["cosmolike_dataset"],
       probe=self.probe)
 
+    # bin-token heads (restrf; the needs_bins flag) split the dv per
+    # tomographic bin: build_shear_angle_map (geometries_output.py)
+    # attaches bin_sizes to the geometry, reading only the dataset ini
+    # and the n(z) file -- no cosmolike.
+    if getattr(self.model_cls, "needs_bins", False):
+      from .geometries_output import build_shear_angle_map
+      build_shear_angle_map(geom=self.geom,
+                            data_dir=d["cosmolike_data_dir"],
+                            dataset=d["cosmolike_dataset"])
+
     # The loss. The factored designs combine the model's templates in
     # closed form (nla: xi = K0 + A1*K1 + A1^2*K2 via nla_coeffs),
     # reading each sample's own amplitudes off the encoded input's last
@@ -575,12 +593,13 @@ class EmulatorExperiment:
       "block_opts", {})["act"] = make_activation(self.activation,
                                                  n_gates=n_gates)
 
-    # Conv-headed models (the conv_head flag: ResCNN, TemplateResCNN)
-    # need geom for their fixed full<->theta basis-change buffers;
-    # ResMLP / TemplateMLP take none. compile_mode falls back to
-    # "default" for them (reduce-overhead's CUDA-graph capture trips on
-    # the gated skip-add); setdefault keeps a YAML-set choice.
-    if getattr(self.model_cls, "conv_head", False):
+    # Geometry-consuming heads (the needs_geom flag: the conv and TRF
+    # models) get geom injected for their fixed full<->theta
+    # basis-change buffers (+ bin_sizes for restrf); ResMLP /
+    # TemplateMLP take none. compile_mode falls back to "default" for
+    # them (reduce-overhead's CUDA-graph capture trips on the gated
+    # skip-add); setdefault keeps a YAML-set choice.
+    if getattr(self.model_cls, "needs_geom", False):
       specs["model_opts"]["geom"] = self.geom
       specs["model_opts"].setdefault("compile_mode", "default")
 

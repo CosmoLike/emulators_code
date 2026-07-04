@@ -33,10 +33,10 @@ train_args:
   loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
   silent:    false       # false -> per-epoch progress lines
 
-  # Two-phase schedule (name: rescnn + ia: nla only; omit or 0 = joint
-  # training).
-  # Phase 1 (epochs 1..trunk_epochs): the conv head is bypassed, so the
-  # model trains as pure nla at nla cost per epoch. Phase 2 (the
+  # Two-phase schedule (a factored correction head: name rescnn |
+  # restrf + ia: nla; omit or 0 = joint training).
+  # Phase 1 (epochs 1..trunk_epochs): the correction head is bypassed,
+  # so the model trains as pure nla at nla cost per epoch. Phase 2 (the
   # remaining nepochs - trunk_epochs): the trunk freezes at phase 1's
   # BEST epoch and runs under no_grad (no trunk backward); only the
   # head + gates train, from a zero-init identity start, so the loss is
@@ -70,9 +70,22 @@ train_args:
     #   resmlp  Plain residual MLP. The baseline; maps the whitened
     #           parameters straight to the whitened data vector.
     #
-    #   rescnn  ResMLP trunk + a 1-D CNN correction head in theta
-    #           order (uncomment the conv-head knobs below). For
-    #           theta-structured residuals.
+    #   rescnn  ResMLP trunk + a 1-D CNN correction head: the
+    #           theta-order dv splits into its (xi+/-, source-pair)
+    #           bins, the bins are the conv CHANNELS, and ONE kernel
+    #           slides along theta over the whole data vector --
+    #           theta-local and cross-bin, with no channel expansion
+    #           (uncomment the conv-head knobs below).
+    #
+    #   restrf  ResMLP trunk + a bin-token TRANSFORMER correction
+    #           head (uncomment the TRF knobs below): the theta-order
+    #           dv splits into its (xi+/-, source-pair) tomographic
+    #           bins, each bin is one token, attention shares
+    #           information ACROSS bins, and each bin then gets its
+    #           own private MLP stack (a textbook transformer shares
+    #           one MLP across tokens; the unique weights also stand
+    #           in for the positional encoding). For cross-bin
+    #           structure in the residuals.
     #
     # `ia` = the factored intrinsic-alignment design layered on the
     # architecture (OMIT the key for the plain emulator):
@@ -83,10 +96,12 @@ train_args:
     #           The amplitude A1 (= LSST_A1_1) never enters the
     #           network, so the emulator is exact in it and its prior
     #           costs zero training coverage. LSST_A1_2 (the eta
-    #           power) stays an input. With name: rescnn the gated
-    #           conv corrects each template in theta order before the
-    #           combine -- the polynomial is untouched, so the
-    #           correction stays exact in A1.
+    #           power) stays an input. With name: rescnn / restrf the
+    #           gated head corrects the templates before the combine
+    #           (conv: templates as channels; trf: each bin token's
+    #           features carry all 3 templates' segments) -- the
+    #           polynomial is untouched, so the correction stays
+    #           exact in A1.
     #
     #   tatt    Reserved (3 amplitudes, 10 templates) -- errors until
     #           its training dumps exist.
@@ -107,19 +122,24 @@ train_args:
     # activation: H
     # n_gates:    3          # gates K for multigate / gated_power
     #
-    # Conv-head knobs (name: rescnn; ignored by resmlp).
-    # The head is memory-bandwidth-bound, not FLOP-bound: its s/epoch
-    # cost scales like channels * n_blocks_cnn (the size of the
-    # (rows, channels, n_keep) intermediates the GPU must move each
-    # step), so budget those two together. With ia: nla the conv reads
-    # the 3 templates as its input channels (Conv1d 3->C->3, cross-
-    # template features; A1 exactness is unaffected -- it lives in the
-    # loss combine).
+    # Conv-head knobs (name: rescnn; ignored by the others). The
+    # channels are the bins themselves (with ia: nla, the (template,
+    # bin) pairs -- cross-template AND cross-bin; A1 exactness is
+    # unaffected, it lives in the loss combine), so the head's
+    # tensors never exceed the padded dv size and there is no
+    # channels knob to budget.
     # kernel_size:  11       # conv kernel width (odd)
-    # channels:     16       # conv filters in the 1D-CNN appendix
-    # n_blocks_cnn: 1        # stacked CNN correction blocks
+    # n_blocks_cnn: 1        # stacked conv+activation blocks
+    #
+    # TRF-head knobs (name: restrf; ignored by the others):
+    # int_dim_trf:  32       # token embedding width (divisible by n_heads)
+    # n_heads:      4        # attention heads
+    # n_blocks_trf: 1        # stacked transformer blocks
+    # n_mlp_blocks: 2        # each bin's private MLP depth per block
+    #
+    # Shared head knobs (rescnn / restrf):
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
-    # compile_mode: default  # conv models default to this already because
+    # compile_mode: default  # conv/TRF models default to this because
     #                        # CUDA-graph capture (reduce-overhead) crashed
     #                        # on the gated skip-add (torch <= 2.x, 2026-06).
     #                        # reduce-overhead is worth ONE retry on a newer

@@ -42,7 +42,7 @@ train_args:
   loss_mode: sqrt
 
   model:                 # name + ia pick the class; other keys its kwargs
-    # name = the ARCHITECTURE (resmlp | rescnn); ia = the factored
+    # name = the ARCHITECTURE (resmlp | rescnn | restrf); ia = the factored
     # intrinsic-alignment design layered on it (omit for the plain
     # emulator; nla). Both fixed across the study -- see the training
     # YAML's model block for the full description.
@@ -53,10 +53,10 @@ train_args:
     # activation: H          # H | power | multigate | gated_power (fixed;
     #                        # the --activation flag overrides)
     # n_gates:    3          # gates K for multigate / gated_power
-    # Conv-head knobs (name: rescnn; ignored by resmlp) -- each may be a
-    # fixed value or a [default, min, max, kind] search range:
+    # Conv-head knobs (name: rescnn; the bins are the channels, so
+    # there is no channels knob) -- each may be a fixed value or a
+    # [default, min, max, kind] search range:
     # kernel_size:  11
-    # channels:     16
     # n_blocks_cnn: 1
     # gate_init:    0.1
     # compile_mode: default  # conv models already default to this

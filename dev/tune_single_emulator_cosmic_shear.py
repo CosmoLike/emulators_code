@@ -42,7 +42,7 @@
 #- The fixed single-emulator choices (probe = xi, AdamW, ReduceLROnPlateau,
 #  use_amp = False, report thresholds, resmlp/rescnn registry) are
 #  EmulatorExperiment defaults (emulator/experiment.py), shared with the training
-#  driver. The model is the YAML's (train_args.model.name = resmlp | rescnn),
+#  driver. The model is the YAML's (train_args.model.name = resmlp | rescnn | restrf),
 #  also fixed; only hyperparameters vary.
 #
 #- Output: stdout only -- a per-trial line (frac>0.2, running best, params) and a
