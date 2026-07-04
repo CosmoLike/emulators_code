@@ -388,21 +388,44 @@ def search_defaults(train_args):
   return out
 
 
-def eval_val(model, lossfn, data, load, bs, thresholds):
+def eval_val(model, lossfn, data, load, bs, thresholds,
+             fwd_chi2=None):
   """
   Evaluate the model on the validation set.
 
   Streams the val rows in chunks of `load`, runs the model in
-  fixed bs-sized batches, gathers the per-sample chi2, then
-  summarizes. The chi2 is gathered first because the mean composes
-  across chunks but the median and threshold fractions do not --
-  they need the full distribution at once.
+  fixed bs-sized batches, and reduces every batch to its
+  per-sample chi2 immediately -- consume, don't stash:
+
+    xb, yb  (bs, ...)         one padded val batch
+       │  fwd_chi2            model forward + per-sample chi2,
+       ▼                      one compiled graph (or eager)
+    c_b (bs,)                 tiny; pad rows sliced off, cloned
+       │  ... all batches, all chunks ...
+       ▼
+    c  (n_val,)               on device, 4 bytes per val point
+       │  one .cpu()          the eval's only device-to-host copy
+       ▼
+    median / mean / frac      (median and the threshold fractions
+                              need the full distribution at once,
+                              so they reduce here, not per chunk)
+
+  The previous form stashed every batch's full prediction (with a
+  per-batch clone of (bs, out_dim) -- reduce-overhead reuses its
+  output buffer) and concatenated them all before one big chi2:
+  for the factored heads that meant ~1 GB of VRAM churn per epoch.
+  Reducing per batch keeps only (bs,) scalars alive -- the clone
+  survives but copies bs floats, not bs x out_dim -- and the
+  device-to-host traffic stays at one small transfer per eval,
+  which matters when the GPU hangs off a bandwidth- and
+  latency-limited link (an eGPU over Thunderbolt).
 
   The model runs in batches of exactly `bs` (the final partial
-  batch padded up to bs, pad rows dropped after), so a
-  torch.compile'd model sees one static input shape and never
-  recompiles. Padding, not dropping, because evaluation must score
-  every val point.
+  batch padded up to bs with copies of row 0, pad chi2 sliced off
+  after), so a torch.compile'd graph sees one static input shape
+  and never recompiles. Padding, not dropping, because evaluation
+  must score every val point; the pad rows' chi2 values are real
+  (a duplicated valid row) and discarded.
 
   Arguments:
     model      = the network, in eval mode.
@@ -412,9 +435,14 @@ def eval_val(model, lossfn, data, load, bs, thresholds):
                  (global validation row indices).
     load       = rows per streamed chunk.
     bs         = model batch size (same as training), so the
-                 compiled model sees one fixed input shape.
+                 compiled graph sees one fixed input shape.
     thresholds = 1D tensor of delta-chi2 cutoffs; the returned
                  fraction counts val points above each.
+    fwd_chi2   = optional (xb, yb) -> (bs,) per-sample-chi2
+                 callable; training_loop_batched passes its
+                 compiled twin (one compile per phase, shared by
+                 the baseline and every epoch). None -> the same
+                 math built here, eager (direct callers).
 
   Returns:
     median = median per-sample chi2 over the val set.
@@ -425,42 +453,45 @@ def eval_val(model, lossfn, data, load, bs, thresholds):
   load_C = data["load_C"]
   load_dv = data["load_dv"]
   vidx = data["idx"]
-  chi2s = []
 
+  if fwd_chi2 is None:
+    # eager fallback: the same math the compiled twin traces.
+    needs_p = getattr(lossfn, "needs_params", False)
+    def fwd_chi2(xb, yb):
+      pred = model(xb)
+      if needs_p:
+        return lossfn.chi2(pred=pred, target=yb,
+                           params_whitened=xb)
+      return lossfn.chi2(pred=pred, target=yb)
+
+  chi2s = []
   with torch.no_grad():
     for cs in range(0, len(vidx), load):
       rows = np.sort(vidx[cs:cs+load])
       Cc  = load_C(rows)             # (m, Ncosmo)
       dvc = load_dv(rows)            # (m, out_dim)
       m   = Cc.shape[0]
-      preds = []
       for s in range(0, m, bs):
         xb = Cc[s:s+bs]
+        yb = dvc[s:s+bs]
         n  = xb.shape[0]             # real rows this batch
         if n < bs:
-          # pad the final short batch up to bs, keeping the compiled
-          # model on one fixed shape. Cc[:1] is the first row;
-          # .expand(bs-n, -1) stretches its size-1 row axis to bs-n
-          # copies (-1 = keep the column axis) as a stride-0 view,
-          # no copy. Pad rows sliced off ([:n]) after the run.
-          pad = Cc[:1].expand(bs - n, -1)
-          xb  = torch.cat([xb, pad], dim=0)
-        # clone: under reduce-overhead (CUDA graphs) the model
-        # reuses a static output buffer per call, so the next
-        # model(xb) overwrites this output -- and we stash several
-        # in `preds` before cat, so copy each out now.
-        preds.append(model(xb)[:n].clone())
+          # pad the final short batch up to bs, keeping the
+          # compiled graph on one fixed shape. [:1] is the chunk's
+          # first row; .expand(bs-n, -1) stretches its size-1 row
+          # axis to bs-n copies (-1 = keep the column axis) as a
+          # stride-0 view, no copy. Both inputs need the padding
+          # now (the chi2 runs per batch); the pad chi2 is sliced
+          # off ([:n]) below.
+          xb = torch.cat([xb, Cc[:1].expand(bs - n, -1)], dim=0)
+          yb = torch.cat([yb, dvc[:1].expand(bs - n, -1)], dim=0)
+        # clone: under reduce-overhead (CUDA graphs) the compiled
+        # graph reuses a static output buffer per call, so the
+        # next call overwrites this result before the cat -- but
+        # the stash is now (bs,) floats, not (bs, out_dim).
+        chi2s.append(fwd_chi2(xb, yb)[:n].clone())
 
-      pred = torch.cat(preds, dim=0)     # (m, out_dim)
-      if getattr(lossfn, "needs_params", False):
-        chi2s.append(lossfn.chi2(pred=pred,
-                                 target=dvc,
-                                 params_whitened=Cc))
-      else:
-        chi2s.append(lossfn.chi2(pred=pred,
-                                 target=dvc))
-
-  c = torch.cat(chi2s).cpu() # per-sample chi2
+  c = torch.cat(chi2s).cpu() # per-sample chi2; the one D2H copy
   mean   = c.mean().item()
   median = c.median().item()
 
@@ -648,44 +679,6 @@ def training_loop_batched(nepochs,
   for g in optimizer.param_groups:
     base_lrs.append(g["lr"])
 
-  # track the best epoch by the inference metric -- the fraction
-  # of val points with chi2 > the first threshold (0.2) -- to keep
-  # the best model, not the last. Seeded by a BASELINE eval of the
-  # INCOMING weights (epoch 0, before any training), so a pass can
-  # never end worse than it started: ordinarily the baseline is a
-  # random init and is overtaken immediately, but at the two-phase
-  # handoff the incoming model is phase 1's best (the zero-init
-  # head makes them identical), and this seed guarantees phase 2
-  # returns at least that even if its first epochs wander.
-  model.eval()
-  b_median, b_mean, b_frac = eval_val(model=model,
-                                      lossfn=lossfn,
-                                      data=data["val"],
-                                      load=load,
-                                      bs=bs,
-                                      thresholds=thresholds)
-  best_frac   = b_frac[0].item()
-  best_median = b_median
-  best_epoch  = 0
-  # snapshot the incoming weights (clone: state_dict returns live
-  # references that training would overwrite).
-  best_state = {}
-  for k, v in model.state_dict().items():
-    best_state[k] = v.detach().clone()
-  # rewind needs the optimizer state that BELONGS to the best
-  # weights (Adam's moments track a trajectory; moments from a bad
-  # basin would kick the restored weights right back out). deepcopy:
-  # state_dict() returns live tensor references. At this baseline
-  # the optimizer is fresh, so the snapshot is the empty state --
-  # restoring it simply resets the moments.
-  best_opt_state = None
-  if rewind:
-    best_opt_state = copy.deepcopy(optimizer.state_dict())
-  if not silent:
-    print(f"epoch   0  baseline (no training yet): "
-          f"val {b_mean:.4f}  med {b_median:.4f}"
-          f"  frac>0.2 {best_frac:.4f}")
-
   # kappa = chi2 scale where the focal weight turns on (fixed over
   # the run, unlike the annealed gamma); from focus_opts, default
   # 1.0. Feeds the loss as focus_scale.
@@ -727,13 +720,26 @@ def training_loop_batched(nepochs,
     return lossfn.loss(pred, target=yb, mode=mode, trim=trim,
                        focus=focus, focus_scale=kappa)
 
-  # compile with the same mode make_model used for the model (the
-  # attribute is absent off-CUDA or with compile disabled).
+  # the eval twin: model forward + per-sample chi2 in one compiled
+  # graph, handed to eval_val (same launch-bound argument, and it
+  # lets eval reduce each batch immediately instead of stashing
+  # every full prediction -- see eval_val's docstring).
+  def _fwd_chi2(xb, yb):
+    pred = model(xb)
+    if needs_p:
+      return lossfn.chi2(pred=pred, target=yb,
+                         params_whitened=xb)
+    return lossfn.chi2(pred=pred, target=yb)
+
+  # compile both with the same mode make_model used for the model
+  # (the attribute is absent off-CUDA or with compile disabled).
   cmode = getattr(model, "emul_compile_mode", None)
   if cmode is not None:
     fwd_loss = torch.compile(_fwd_loss, mode=cmode)
+    fwd_chi2 = torch.compile(_fwd_chi2, mode=cmode)
   else:
     fwd_loss = _fwd_loss
+    fwd_chi2 = _fwd_chi2
 
   # the annealed per-epoch loss scalars, as 0-dim device tensors:
   # a compiled function guards on a Python float by value, so an
@@ -743,6 +749,45 @@ def training_loop_batched(nepochs,
   # loss's _reduce is built for tensor scalars).
   trim_t  = torch.zeros((), device=device)
   focus_t = torch.zeros((), device=device)
+
+  # track the best epoch by the inference metric -- the fraction
+  # of val points with chi2 > the first threshold (0.2) -- to keep
+  # the best model, not the last. Seeded by a BASELINE eval of the
+  # INCOMING weights (epoch 0, before any training), so a pass can
+  # never end worse than it started: ordinarily the baseline is a
+  # random init and is overtaken immediately, but at the two-phase
+  # handoff the incoming model is phase 1's best (the zero-init
+  # head makes them identical), and this seed guarantees phase 2
+  # returns at least that even if its first epochs wander.
+  model.eval()
+  b_median, b_mean, b_frac = eval_val(model=model,
+                                      lossfn=lossfn,
+                                      data=data["val"],
+                                      load=load,
+                                      bs=bs,
+                                      thresholds=thresholds,
+                                      fwd_chi2=fwd_chi2)
+  best_frac   = b_frac[0].item()
+  best_median = b_median
+  best_epoch  = 0
+  # snapshot the incoming weights (clone: state_dict returns live
+  # references that training would overwrite).
+  best_state = {}
+  for k, v in model.state_dict().items():
+    best_state[k] = v.detach().clone()
+  # rewind needs the optimizer state that BELONGS to the best
+  # weights (Adam's moments track a trajectory; moments from a bad
+  # basin would kick the restored weights right back out). deepcopy:
+  # state_dict() returns live tensor references. At this baseline
+  # the optimizer is fresh, so the snapshot is the empty state --
+  # restoring it simply resets the moments.
+  best_opt_state = None
+  if rewind:
+    best_opt_state = copy.deepcopy(optimizer.state_dict())
+  if not silent:
+    print(f"epoch   0  baseline (no training yet): "
+          f"val {b_mean:.4f}  med {b_median:.4f}"
+          f"  frac>0.2 {best_frac:.4f}")
 
   # wall-clock timing for GPU comparison. eval_val's .item() below
   # syncs the GPU before each epoch's log line, so perf_counter around
@@ -830,7 +875,8 @@ def training_loop_batched(nepochs,
                                   data=data["val"],
                                   load=load,
                                   bs=bs,
-                                  thresholds=thresholds)
+                                  thresholds=thresholds,
+                                  fwd_chi2=fwd_chi2)
     train_losses.append(train_loss)
     medians.append(median)
     means.append(mean)

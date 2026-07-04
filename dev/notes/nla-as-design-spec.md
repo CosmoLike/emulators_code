@@ -160,6 +160,29 @@ epochs 2.2-2.4s contended -> 1.5s ("good - it did reduce"); epoch 1
 = 22.8s one-time compile (loss now inside the trace). Quiet-machine
 number still to be observed (~0.4-0.55s expected).
 
+EVAL PASS STREAMLINED (04t follow-up; user: "if that is easy to
+fix - why not fix it now?", + the amypond eGPU-over-TB4 argument:
+~4 GB/s host link makes copies/latency precious). eval_val
+rewritten consume-don't-stash: per batch, fwd_chi2(xb, yb) = model
+forward + per-sample chi2 in ONE compiled graph (the eval twin of
+_fwd_loss, built once per phase in training_loop_batched next to
+its sibling and passed in; eager fallback built inside eval_val for
+direct callers). Kills: the per-batch (bs, out_dim) prediction
+clone, the ~1 GB/epoch stash+cat VRAM churn (factored heads), and
+~half the eval launch count. The ragged final batch now pads BOTH
+xb and yb (chi2 runs per batch; pad rows = duplicated row 0, real
+chi2 values sliced off). D2H unchanged: one 4-bytes-per-val-point
+transfer + the .item() reads (TB4-relevant: transfers already
+minimal, kept that way). Numerically identical by construction
+(per-sample chi2 is row-independent). TB4 traffic clarification
+banked: the stash/cat churn was VRAM-internal, not host-link; what
+crosses TB4 is loader streaming (zero if train+val resident, which
+the budget planner targets: val planned against budget - train).
+test_fwdloss_compile.py extended to 11 checks (eval == direct
+full-batch chi2 with ragged batches, needs_params padded-params
+threading, explicit-twin spy proving every batch runs at bs).
+Full battery green.
+
 **HEAD FOCUS ENABLED (2026-07-04s; user: "why CNN has no focus? by
 the handoff there are very few outliers -- focus could help where
 chi2 is ~1 to 10").** The all-zero head focus block was a
