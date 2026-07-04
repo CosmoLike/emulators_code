@@ -6,8 +6,10 @@ models' final layer). ResBlock is a width-preserving residual block (n
 dense layers, each with a norm and activation factory, skip added before
 the last). BinLinear and TRFBlock are the ResTRF head's pieces: per-bin
 unique linears and a transformer block whose tokens are the tomographic
-bins. (ResCNN's bins-as-channels conv head is a bare nn.Conv1d, needing
-no block here.) Grouped / per-bin conv twins live in parallel/.
+bins. conv1d_as_matmul runs the ResCNN heads' bare nn.Conv1d layers as
+a single matmul (same parameters, same output; the heads' conv shape is
+pathologically slow on the native conv kernels). Grouped / per-bin conv
+twins live in parallel/.
 """
 
 import torch
