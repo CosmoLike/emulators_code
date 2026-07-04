@@ -265,7 +265,20 @@ a live lr cut (near-no-op at a healthy plateau, as designed);
 trunk-vs-head param print exact to the digit incl. separable
 (4,427); handoff baseline seeded from phase-1 best; groups=6 +
 rescale_kernel + separable all ran in production. The whole 07-04
-feature stack is validated; next stop is the TATT + w0wa dumps. The REAL
+feature stack is validated; next stop is the TATT + w0wa dumps.
+CURRENT PRODUCTION TEMPLATE (07-04 end of day, user-authored):
+sqrt loss both phases; trunk trim 0.1 -> 0.01 (hold 50, anneal
+400) + focus 0 -> 2 (kappa 0.15); head lr_base 0.001, trim 0.03 ->
+0.01 (hold 15, anneal 100), focus now ENABLED 0 -> 2 kappa 0.2
+with a halved schedule (hold ~15, anneal ~50; rationale in
+[[nla-as-design-spec]] 04s); trim floors 0.01 everywhere; rewind
+true recommended always; gate_init 1 in recent smokes (safe with
+the zero-init identity). Full cnn block: kernel_size 11 +
+rescale_kernel true (-> k=7 at 2 blocks), groups 6, separable
+true (head 4,427 params; separable = parameter economy NOT speed,
+3.9s vs 2.9s plain on the small-SM GPU). YAML style: block style
+only, never {...}. README is a first-class doc surface (it went
+stale repeatedly). The REAL
 comparison arrives with TATT + w0wa dumps: that is where a
 ResMLP-only trunk demands many more training points and the lean
 factored conv head (rescale_kernel + groups; production smoke config

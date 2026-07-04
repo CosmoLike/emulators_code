@@ -118,6 +118,36 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**HEAD FOCUS ENABLED (2026-07-04s; user: "why CNN has no focus? by
+the handoff there are very few outliers -- focus could help where
+chi2 is ~1 to 10").** The all-zero head focus block was a
+HISTORICAL safety default from the 04l post-mortem, not a
+principled choice. User's physics is right: after a mature trunk,
+the batch is ~85% solved bulk and the head's whole job is the
+0.2-10 band, but a plain mean aims most gradient at the bulk by
+headcount; focal weighting re-aims it. Structurally safer than the
+04l chi2 failure: weights bounded (h <= 1), detached (ungameable),
+monsters excluded by the trim floor, rewind as net. kappa selects
+the band (h = c/(c+kappa) crosses 1/2 at c = kappa): kappa ~0.2 =
+metric-aligned (everything above the frac>0.2 threshold; bulk gets
+~15x less at gamma 2); kappa ~1 = the literal 1-10 band BUT
+down-weights the counted 0.2-1 points to ~3% -- rejected for the
+frac metric. RECOMMENDED head focus: start 0, end 2.0, kappa 0.2,
+hold 15; anneal: user halved my symmetry-derived 100 to ~50 --
+CORRECT, the ramp only needs to outlast the HEAD's fast-learning
+window (head best ~epoch 90 historically; full gamma at ~65 lands
+when easy gains are exhausted). Too-short symptom: flat first ~30
+head epochs (focus on the tail before the broad correction is
+learned) -> lengthen the HOLD, not the anneal. User's current
+production template: sqrt both phases; trunk trim 0.1 -> 0.01
+(hold 50, anneal 400); head lr_base 0.001, trim 0.03 -> 0.01
+(hold 15, anneal 100); trim floors 0.01 everywhere = the 04l
+vaccine. YAML STYLE (banked in auto-memory too): block style, one
+key per line, never inline {...} -- example YAMLs converted.
+README = the doc surface that repeatedly went stale (head knobs,
+two-phase keys, guards all missing until audited 07-04); treat it
+as first-class in every feature's doc pass.
+
 **SEPARABLE CONV FLAG (2026-07-04r; user approved after a
 weighted-sum design review: "yes lets do that").** New
 model.cnn.separable bool (default false): each head block factors
