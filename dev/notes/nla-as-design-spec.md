@@ -118,6 +118,28 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**KERNEL RESCALING FLAG (2026-07-04n; user: "kernel_size number =
+the optimal one for 1 block, and another flag that when set
+rescales it when I increase the number of CNN blocks").** New
+model.cnn.rescale_kernel bool (default false). Semantics:
+kernel_size is tuned AS IF n_blocks were 1, i.e. it states the
+head's target receptive field; with the flag on, the per-block
+kernel shrinks with depth so the stack keeps that view: RF of n
+stacked same-padded convs = n*(k-1)+1, solve >= kernel_size for the
+smallest odd k_n = odd-up(ceil((kernel_size-1)/n) + 1). Table at
+kernel_size 27 (one bin + margin at max_bin 26): n = 1/2/3/4/5 ->
+k = 27/15/11/9/7 (n=3 -> 11 reproduces the current production
+config). Properties (tested): identity at n=1, always odd, RF never
+undershoots, monotone non-increasing, head params ~ C^2 *
+(kernel_size - 1 + 2n) nearly flat in depth (depth buys
+nonlinearity, not size). NOT a replacement of kernel_size by a
+string -- user explicitly rejected kernel_size: "auto" mid-build
+("I am confused here") in favor of number + flag. Implementation:
+rescale_kernel_size in building blocks; ResCNN + TemplateResCNN
+take rescale_kernel and store the resolved self.kernel_size;
+MODEL_BLOCK_KEYS cnn block maps it; example YAML documents it.
+test_rescale_kernel.py (13 checks) + full battery green.
+
 **CLIP + REWIND STABILITY GUARDS (2026-07-04m; user: "how to
 implement both").** Two new YAML knobs, top-level with symmetric
 trunk:/head: per-phase overrides (both default off): clip = per-step

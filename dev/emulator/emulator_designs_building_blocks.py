@@ -1,21 +1,25 @@
-"""Shared nn building blocks (Affine, ResBlock, BinLinear, TRFBlock).
+"""Shared nn building blocks (Affine, ResBlock, rescale_kernel_size,
+BinLinear, TRFBlock).
 
 The small nn.Modules the emulator models (emulator_designs.py) are
 assembled from. Where each piece sits:
 
   ResMLP = Linear -> n_blocks x ResBlock -> Linear -> Affine
   ResCNN = ResMLP trunk + conv correction head (bare nn.Conv1d
-             layers, needing no block here)
+             layers, needing no block here; the rescale_kernel flag
+             resolves the width through rescale_kernel_size)
   ResTRF = ResMLP trunk + TRFBlock correction head
              (per-token unique MLPs = BinLinear)
 
 Affine is a learnable scalar scale and shift (the default ResBlock
 "norm" and the models' final layer). ResBlock is a width-preserving
 residual block (n dense layers, each with a norm and activation
-factory, skip added before the last). BinLinear and TRFBlock are the
-ResTRF head's pieces: per-token unique linears and a transformer
-block whose tokens are the tomographic bins. Grouped / per-bin conv
-twins live in parallel/.
+factory, skip added before the last). rescale_kernel_size shrinks
+the conv heads' kernel as their depth grows, preserving a single
+block's receptive field. BinLinear and TRFBlock are the ResTRF
+head's pieces: per-token unique linears and a transformer block
+whose tokens are the tomographic bins. Grouped / per-bin conv twins
+live in parallel/.
 """
 
 import torch
@@ -115,6 +119,58 @@ class ResBlock(nn.Module):
         out = out + xskip
       out = self.acts[i](self.norms[i](out))
     return out
+
+
+def rescale_kernel_size(kernel_size, n_blocks_cnn):
+  """
+  Per-block kernel width that preserves a single block's view as
+  the conv head deepens.
+
+  kernel_size is read as the width one block alone would use, so it
+  states the head's target total view: a single same-padded conv of
+  width k sees k positions. n stacked same-padded convs of width
+  k_n see
+
+    RF = n * (k_n - 1) + 1
+
+  (each extra layer widens the window an output position sees by
+  k_n - 1). Without rescaling, deepening the stack over-grows the
+  view (3 blocks of k = 11 see RF = 31, wider than a whole
+  26-point bin). This helper instead solves RF >= kernel_size for
+  the smallest odd k_n (same-padding needs odd):
+
+    k_n = ceil((kernel_size - 1) / n_blocks_cnn) + 1, then odd-up.
+
+  Extra depth then buys nonlinearity at a fixed total view. It also
+  keeps the head size nearly flat: per-block conv parameters scale
+  with k_n (C_in*C_out*k_n + C_out), so the head total ~
+  C^2 * n * k_n ~ C^2 * (kernel_size - 1 + 2n). At kernel_size 27
+  (one bin + margin at the LSST-Y1 run's max_bin = 26):
+
+    n_blocks_cnn : 1    2    3    4    5
+    k_n          : 27   15   11   9    7
+    RF           : 27   29   31   33   31
+
+  (RF overshoots kernel_size where odd-up rounds; it never
+  undershoots.)
+
+  Arguments:
+    kernel_size  = the single-block kernel width = the target
+                   receptive field (odd).
+    n_blocks_cnn = number of stacked conv+activation blocks.
+
+  Returns:
+    the per-block kernel width k_n (odd int; = kernel_size when
+    n_blocks_cnn is 1).
+  """
+  # ceil((kernel_size-1)/n) via negated floor division (pure ints,
+  # no float rounding), + 1 = the smallest k_n with RF >=
+  # kernel_size.
+  k = -(-(kernel_size - 1) // n_blocks_cnn) + 1
+  # odd-up: same-padding needs an odd kernel to keep the length.
+  if k % 2 == 0:
+    k += 1
+  return k
 
 
 class BinLinear(nn.Module):

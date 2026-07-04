@@ -165,7 +165,17 @@ train_args:
     # lives in the loss combine), so the head's tensors never exceed
     # the padded dv size and there is no channels knob to budget.
     # cnn:
-    #   kernel_size: 11    # conv kernel width (odd)
+    #   kernel_size: 11    # conv kernel width (odd), tuned as if
+    #                      # n_blocks were 1 (the target view)
+    #   rescale_kernel: false
+    #                      # true = shrink the per-block kernel as
+    #                      # n_blocks grows, so the stack keeps ONE
+    #                      # kernel_size-wide block's receptive field
+    #                      # (n*(k-1)+1 >= kernel_size) instead of
+    #                      # over-growing it; head params stay nearly
+    #                      # flat in depth. E.g. kernel_size 27 ->
+    #                      # per-block k = 27 / 15 / 11 / 9 at
+    #                      # n_blocks = 1 / 2 / 3 / 4.
     #   n_blocks:    1     # stacked conv+activation blocks
     #   gate_init:   0.1   # initial correction scale (small, not 0)
     #

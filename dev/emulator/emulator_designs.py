@@ -38,7 +38,7 @@ import torch.nn as nn
 
 from .activations import activation_fcn
 from .emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock)
+  Affine, ResBlock, TRFBlock, rescale_kernel_size)
 
 
 class ResMLP(nn.Module):
@@ -186,7 +186,20 @@ class ResCNN(nn.Module):
     geom         = full-whitening DataVectorGeometry carrying
                    bin_sizes; its evecs / sqrt_ev define the basis
                    buffers.
-    kernel_size  = conv kernel width (odd, same-padded).
+    kernel_size  = conv kernel width (odd, same-padded), tuned as
+                   if the head had ONE block. With rescale_kernel
+                   it states the target receptive field; without,
+                   it is used verbatim for every block.
+    rescale_kernel = False (default): every block uses kernel_size
+                   as given. True: the per-block kernel shrinks
+                   with depth so the n_blocks_cnn-deep stack keeps
+                   a single kernel_size-wide block's view --
+                   receptive field n*(k-1)+1 >= kernel_size, see
+                   rescale_kernel_size. Depth then buys
+                   nonlinearity at a fixed total view (and
+                   near-flat head parameters) instead of
+                   over-growing the receptive field. The resolved
+                   width is stored as self.kernel_size.
     n_blocks     = residual blocks in the trunk.
     n_blocks_cnn = stacked conv+activation correction blocks.
     gate_init    = initial value of the scalar scaling the
@@ -207,8 +220,8 @@ class ResCNN(nn.Module):
   needs_bins = True
 
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
-               kernel_size=11, n_blocks=3, n_blocks_cnn=1,
-               gate_init=0.1, block_opts=None):
+               kernel_size=11, rescale_kernel=False, n_blocks=3,
+               n_blocks_cnn=1, gate_init=0.1, block_opts=None):
     super().__init__()
     if block_opts is None:
       block_opts = {}
@@ -249,6 +262,15 @@ class ResCNN(nn.Module):
     # falling back to activation_fcn (the paper's H); act(max_bin)
     # gives per-position parameters, broadcast over the bin axis.
     cnn_act = block_opts.get("act", activation_fcn)
+    # rescale_kernel: kernel_size was tuned for a single block, so
+    # shrink the per-block kernel with depth to keep that block's
+    # view -- receptive field n*(k-1)+1 >= kernel_size, see
+    # rescale_kernel_size -- instead of over-growing it.
+    if rescale_kernel:
+      kernel_size = rescale_kernel_size(kernel_size=kernel_size,
+                                        n_blocks_cnn=n_blocks_cnn)
+    # the resolved per-block width, inspectable after a rescale.
+    self.kernel_size = int(kernel_size)
     pad = (kernel_size - 1) // 2
     convs, acts = [], []
     for _ in range(n_blocks_cnn):
