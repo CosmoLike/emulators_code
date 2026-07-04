@@ -760,6 +760,16 @@ def training_loop_batched(nepochs,
   # simply not compiled -- one code path, two execution modes.
   needs_p = getattr(lossfn, "needs_params", False)
 
+  # kappa as a 0-dim device tensor, like trim_t / focus_t below: a
+  # Python float in the traced closure is torch-version-dependent
+  # -- some versions specialize it to a constant, others lift it as
+  # an UNSPECIALIZED float backed by a 0-dim CPU tensor input,
+  # which silently disables CUDA-graph replay ("skipping cudagraphs
+  # due to cpu device (primals_N)"). A device tensor is graph-safe
+  # everywhere; kappa is fixed per pass, so it is created once, not
+  # filled per epoch.
+  kappa_t = torch.as_tensor(float(kappa), device=device)
+
   def _fwd_loss(xb, yb, trim, focus):
     # the model forward under autocast (unchanged semantics); the
     # loss math stays outside it, in full precision.
@@ -771,9 +781,9 @@ def training_loop_batched(nepochs,
       return lossfn.loss(pred=pred, target=yb,
                          params_whitened=xb, mode=mode,
                          trim=trim, focus=focus,
-                         focus_scale=kappa)
+                         focus_scale=kappa_t)
     return lossfn.loss(pred, target=yb, mode=mode, trim=trim,
-                       focus=focus, focus_scale=kappa)
+                       focus=focus, focus_scale=kappa_t)
 
   # the eval twin: model forward + per-sample chi2 in one compiled
   # graph, handed to eval_val (same launch-bound argument, and it

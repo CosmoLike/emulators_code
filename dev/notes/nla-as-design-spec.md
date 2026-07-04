@@ -183,7 +183,35 @@ and lossfn.geom, flagging type mismatches AND cuda-index
 mismatches (cuda:0 vs cuda:1 on the two-GPU boxes); run_emulator
 calls it after build_loaders and prints "device audit: <owner>:
 <device>" per offender (non-silent runs). test_device_audit.py.
-NEXT RUN will name primals_90's owner in plain text.
+AUDIT CAME BACK CLEAN (user rerun) -- primals_90 is NOT a stored
+tensor. Narrowed suspects: (a) a Python float dynamo lifted to a
+0-dim CPU tensor input on the head-phase RECOMPILE (automatic
+dynamic promotes changed/specialized scalars; kappa is the prime
+candidate), or (b) a tensor created at trace time inside a
+forward. NEXT DIAGNOSTIC (no code change): rerun with env
+TORCH_LOGS="cudagraphs" -- the skip message then carries "Found
+from <file:line>" naming the producing code. The doubled skip
+message = forward AND backward graphs both falling back. Fix
+pattern once named: pass the offender as a 0-dim DEVICE tensor
+like trim_t/focus_t. Also noted: the truncated-trunk film result
+REPRODUCED (0.5000 -> 0.284 by head epoch 5, matching the first
+run) -- the 04w-addendum finding is stable across runs.
+RESOLVED (high confidence, fix shipped): TORCH_LOGS carried no
+"Found from" on their torch build, so the primals table was
+RECONSTRUCTED LOCALLY by tracing the exact production config with
+a capture backend (find_primals_90*.py, scratchpad): head-phase
+fwd_loss = 89 accounted inputs ending in trim_t/focus_t;
+production's 90th is the ONE remaining Python float in the traced
+step -- KAPPA (focus_scale). Some torch builds lift closure floats
+as unspecialized 0-dim CPU tensor inputs, AND the lift happens on
+RECOMPILE -- exactly why the trunk phase (first compile,
+specialized constant) recorded graphs while the head phase
+(recompile of the same code object) skipped. FIX: kappa_t =
+torch.as_tensor(float(kappa), device=device), once per pass,
+passed as focus_scale (_reduce already accepts tensor scalars;
+bit-exact equivalence verified). No float remains in the traced
+closure. CONFIRM on the next run: skip line gone + faster head
+epochs; if it persists, resume with aot_graphs logging.
 
 **TRF FILM + TATT ACTIVATED (2026-07-04v; user: "so no film To
 TRF? Once you do all that you need to implement the TATT version

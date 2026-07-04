@@ -238,7 +238,12 @@ class CosmolikeChi2:
                     0-dim tensor.
       focus       = focal exponent gamma; float or 0-dim tensor
                     (<= 0 -> plain mean, since h**0 = 1).
-      focus_scale = focal turn-on scale (float, fixed per run).
+      focus_scale = focal turn-on scale, fixed per run; float or
+                    0-dim tensor (the training loop passes a
+                    device tensor -- a closure float is
+                    torch-version-dependent under compile and can
+                    surface as a CPU input that breaks CUDA-graph
+                    replay).
 
     Returns:
       a scalar loss tensor.
