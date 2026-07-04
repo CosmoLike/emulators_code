@@ -42,11 +42,13 @@
 #    cosmolike dataset (cosmolike_data_dir, cosmolike_dataset; resolved under
 #    $ROOTDIR/external_modules/data, not --root).
 #  - `train_args`: knobs (nepochs, bs, loss_mode, silent) plus sub-blocks model
-#    (name = resmlp | rescnn | nla, then kwargs: int_dim_res, n_blocks; for
-#    rescnn kernel_size / channels / n_blocks_cnn / gate_init; nla = the
-#    factored intrinsic-alignment design, which emits three templates and
-#    combines them as K0 + A1 K1 + A1^2 K2 in the loss, so the LSST_A1_1
-#    amplitude never enters the network), optimizer (weight_decay),
+#    (name = resmlp | rescnn | nla | rescnn_nla, then kwargs: int_dim_res,
+#    n_blocks; for the conv-headed models kernel_size / channels /
+#    n_blocks_cnn / gate_init; nla = the factored intrinsic-alignment
+#    design, which emits three templates and combines them as
+#    K0 + A1 K1 + A1^2 K2 in the loss, so the LSST_A1_1 amplitude never
+#    enters the network; rescnn_nla = nla plus a shared 1D-CNN correction
+#    head on the templates), optimizer (weight_decay),
 #    lr (lr_base, bs_base, warmup_epochs), scheduler (mode, patience, factor),
 #    trim / focus (robustness schedules).
 #
@@ -91,9 +93,11 @@
 #  per-cosmology 1/R factor); `residual` = ResidualBaseChi2 (v2: R moves the
 #  baseline only, plain chi2). Both need cosmolike's angle map.
 #
-#- `--activation` (optional, default `H`): ResBlock activation -- `H` (paper's
-#  leaky/Swish gate), `power` (bounded learnable tail exponent), `multigate` (K=3
-#  gates), or `gated_power` (K=3 gates + tail exponent).
+#- `--activation` (optional): ResBlock activation -- `H` (paper's leaky/Swish
+#  gate), `power` (bounded learnable tail exponent), `multigate` (K gates), or
+#  `gated_power` (K gates + tail exponent); K = YAML model.n_gates (default 3).
+#  Set it in the YAML instead as train_args.model.activation; the flag, when
+#  given, overrides the YAML, and with neither the default is `H`.
 #
 #- `--quiet` (optional): suppresses all stdout -- driver prints, load_source's
 #  per-source line, run_emulator's per-epoch log. The --diagnostic PDF still writes.
@@ -205,12 +209,15 @@ def main():
   parser.add_argument("--activation",
                       dest="activation",
                       help="ResBlock activation: 'H' (the paper's "
-                           "H, default), 'power', 'multigate' "
-                           "(K=3), or 'gated_power' (K=3)",
+                           "H), 'power', 'multigate', or "
+                           "'gated_power' (gate count K = the YAML "
+                           "model.n_gates, default 3). Overrides "
+                           "the YAML train_args.model.activation; "
+                           "default: the YAML's choice, else 'H'",
                       type=str,
                       choices=["H", "power", "multigate",
                                "gated_power"],
-                      default="H")
+                      default=None)
   parser.add_argument("--quiet",
                       dest="quiet",
                       help="suppress all stdout: the driver's "
@@ -352,8 +359,8 @@ def main():
           f"f_floor {floor['f_floor']:.3f}  "
           f"pure hardness {floor['f_hard']:.3f}")
     else:
-      log("floor: skipped (local-linear floor needs a plain "
-          "chi2fn; --rescale is on)")
+      log("floor: skipped (local-linear floor needs a plain chi2fn; "
+          "this loss is param-aware: rescaled or factored-IA)")
     # val_set + names add page 4: the getdist LCDM triangle of the val
     # cosmologies colored by log10 delta-chi2 (cov["dchi2"], same rows).
     # cuts shades the physically-removed regions gray on that page.

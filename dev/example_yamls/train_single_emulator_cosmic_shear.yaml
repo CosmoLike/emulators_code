@@ -60,23 +60,42 @@ train_args:
     #           is scaled per sample (whiten(dv - Ats * center)), so there
     #           is no constant template. As STILL enters the net as an
     #           input, because halofit makes the dv nonlinear in As; only
-    #           the linear-order amplitude is pulled out.
+    #           the linear-order amplitude is pulled out. (Tried 2026-07:
+    #           erased the nla gain; kept for the record.)
+    #
+    #   rescnn_nla  nla plus rescnn's 1-D CNN correction head: the trunk
+    #           emits the 3 templates and ONE shared gated conv corrects
+    #           each of them in theta order before the loss combines
+    #           them. The amplitude polynomial is untouched, so the
+    #           correction stays exact in A1. Takes the CNN knobs below.
     #
     name:        resmlp
     #
-    # Trunk kwargs (all four models):
+    # Trunk kwargs (all models):
     int_dim_res: 128         # residual-block width
     n_blocks:    4           # number of residual blocks
     #
-    # ResCNN-only knobs (ignored by the others) -- uncomment for rescnn:
+    # Activation for the ResBlocks (the conv head shares it). One of:
+    #   H            the paper's learnable leaky/Swish gate (the default)
+    #   power        H with a bounded learnable tail exponent
+    #   multigate    K independent gates (K = n_gates)
+    #   gated_power  K gates + the tail exponent
+    # The --activation flag, when given, overrides this key.
+    # activation: H
+    # n_gates:    3          # gates K for multigate / gated_power
+    #
+    # Conv-head knobs (rescnn / rescnn_nla; ignored by the others):
     # kernel_size:  11       # conv kernel width (odd)
     # channels:     16       # conv filters in the 1D-CNN appendix
     # n_blocks_cnn: 1        # stacked CNN correction blocks
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
-    # compile_mode: default  # CUDA: ResCNN may need this, not reduce-overhead
+    # compile_mode: default  # conv models default to this already (CUDA
+    #                        # graphs trip on the gated skip-add); set it
+    #                        # only to override.
     #
-    # nla / nla_as need no kwargs here: n_amps and the 3 templates plus
-    # the amplitude column names are set automatically (experiment.py).
+    # nla / nla_as / rescnn_nla need no other kwargs: n_amps and the 3
+    # templates plus the amplitude column names are set automatically
+    # (experiment.py).
 
   optimizer:             # cls is fixed to AdamW in the script
     weight_decay: 0.0

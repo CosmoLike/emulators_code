@@ -132,7 +132,15 @@ class ResCNN(nn.Module):
                    handed to the CNN head, so head and trunk share
                    one activation family. Defaults to activation_fcn
                    (the paper's H) when block_opts sets no "act".
+
+  conv_head = True is a capability flag EmulatorExperiment reads:
+  it injects geom (for the basis buffers) and defaults compile_mode
+  to "default" (reduce-overhead's CUDA-graph capture trips on the
+  gated skip-add), so a new conv-headed model opts in by setting
+  the flag rather than by being added to an isinstance check.
   """
+  conv_head = True
+
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
                kernel_size=11, channels=16, n_blocks=3,
                n_blocks_cnn=1, gate_init=0.1, block_opts=None):

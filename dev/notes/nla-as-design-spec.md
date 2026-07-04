@@ -35,3 +35,45 @@ caught by the user and resolved via the scaled center); this note lets the
 implementation start cold without re-deriving any of it. Pairs with
 [[npce-and-ia-template-factoring]] and [[omegam2h2-window-cut]] (OUTCOME
 section carries the nla-vs-resmlp numbers).
+
+**POST-RUN INSIGHT (nla diagnostics, 2026-07-03): LSST_A1_1 did NOT
+vanish from the hardness ranking (still 5th, ~unchanged), and that is
+CORRECT behavior, not a bug: the error is dxi = dK1 + A1 dK2 + A1^2 dK3,
+so template errors are AMPLIFIED by |A1|. Factoring converts the A1
+problem from axis COVERAGE (scales with prior width, the TATT killer)
+to template-error AMPLIFICATION (shrinks with N). The right success
+signatures are the metric gain (0.156 -> 0.147) and the sparse-decile
+improvement (0.381 -> 0.346), not a zero A1 correlation. Expect the
+same shape for TATT: amplitudes stay in the hardness ranking while
+their prior stops costing coverage.**
+
+**VERDICT (2026-07-03 run): ABANDONED, code kept.** nla_as frac>0.2 =
+0.1559 (== resmlp 0.1558; nla alone 0.1472), median 0.0464. The Ats
+scaling ERASED the nla gain, and hardness joint R^2 jumped 0.18 -> 0.42:
+errors became strongly As-directional (dxi = Ats * dK amplification),
+the A-form conditioning failure the loss-family history predicted. The
+exact-A1 half works; the approximate-As half hurts.
+
+**rescnn_nla BUILT (2026-07-03, awaiting first run).** TemplateResCNN in
+emulator/IA/emulator_designs.py: TemplateMLP trunk emitting the 3
+templates + ONE shared gated CNNBlock stack correcting each template in
+theta order before the loss combines them (templates fold into the batch
+axis, so the conv learns from 3x the examples; per-TEMPLATE gates,
+(n_templates, 1), init 0.1 -- GG/GI/II have very different whitened
+magnitudes). Amplitude polynomial untouched -> the correction inherits
+the exact-A1 generalization. Basis handling = ResCNN's W_fd/W_df frozen
+buffers (CUDA-graph safe); act_mid gotcha handled by CNNBlock itself.
+Wiring: the isinstance checks in experiment.py became CAPABILITY FLAGS
+on the model classes -- factored=True (TemplateMLP, TemplateResCNN)
+picks AmplitudeFactorGeometry + the template-combining loss;
+conv_head=True (ResCNN, TemplateResCNN) injects geom AND setdefaults
+compile_mode="default" (so rescnn/rescnn_nla no longer crash under
+reduce-overhead unless the YAML overrides). The rescale guard moved
+ABOVE build_geometry's lazy cosmolike import (fail fast + testable
+off-workstation). 19/19 venv tests pass (buffers invert, fold ==
+per-template loop, gate=0 == trunk exactly, grads reach all gates,
+state round-trip, from_config/build_specs injections, make_model
+end-to-end, combine+backward). YAML: model.name: rescnn_nla + uncomment
+the conv-head knobs (kernel_size 11 / channels 16 / n_blocks_cnn 1 /
+gate_init 0.1). Judge vs nla 0.1472 at matched T=256/250k; the bet is
+the dense-decile residual (0.122, untouched by nla) is theta-structured.

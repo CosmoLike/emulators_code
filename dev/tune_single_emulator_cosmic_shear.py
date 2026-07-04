@@ -81,12 +81,14 @@ def main():
   parser.add_argument("--activation",
                       dest="activation",
                       help="ResBlock activation, fixed across the "
-                           "study: 'H' (default), 'power', "
-                           "'multigate', or 'gated_power'",
+                           "study: 'H', 'power', 'multigate', or "
+                           "'gated_power'. Overrides the YAML "
+                           "train_args.model.activation; default: "
+                           "the YAML's choice, else 'H'",
                       type=str,
                       choices=["H", "power", "multigate",
                                "gated_power"],
-                      default="H")
+                      default=None)
   parser.add_argument("--n-trials",
                       dest="n_trials",
                       help="number of Optuna trials (default 50)",

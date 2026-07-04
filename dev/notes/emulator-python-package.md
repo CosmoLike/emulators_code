@@ -204,3 +204,51 @@ NLA-specific trio + the IA* renames. Style for this code:
 and naming convention, the faithful-port + verify methodology, the new
 construction helpers, and the search-range convention -- so the next session
 edits the package directly instead of re-deriving where everything went.
+
+## Session 2026-07-03 (T=256 production day; the big feature batch)
+
+LATE ADDITIONS (same day, after the rescnn_nla build): activation is
+now a YAML key, train_args.model.activation (H | power | multigate |
+gated_power) + model.n_gates (K for the gated families, default 3).
+Precedence resolved ONCE in from_config: an explicit --activation (the
+3 drivers' argparse default changed "H" -> None so an absent flag
+defers) > YAML > "H"; build_specs STRIPS activation/n_gates from the
+model-block spread (like name) and threads n_gates into
+make_activation -- do NOT re-read activation in build_specs, that
+would flip precedence back to the YAML. bakeoff_activation is
+unaffected (passes activation explicitly, wins over YAML by design).
+Also: capability flags replaced the model isinstance checks
+(factored=True on TemplateMLP/TemplateResCNN -> AmplitudeFactor
+geometry + template loss; conv_head=True on ResCNN/TemplateResCNN ->
+geom injection + compile_mode setdefault "default"), and the rescale
+guard moved above build_geometry's lazy cosmolike import (fail fast,
+testable off-workstation).
+
+Driver/infra added (all in repo, verified): per-epoch + steady s/epoch
+timing in training_loop_batched; save_emulator in results.py (.emul =
+cpu state_dict with _orig_mod stripped; .h5 = geometry state() groups
+written RECURSIVELY + histories + config_yaml + attrs; always saved,
+BEFORE diagnostics); run_tag naming (<root>_<model>_t<T>_ntrain<N>);
+run products -> --root/chains (resolve_cocoa_config returns chains);
+startup banner prints the full resolved design (model spec + all
+train_args blocks + cuts) to catch stale YAMLs; physical cuts
+omegabh2_lo + omegam2h2_lo/hi in phys_cut_idx/YAML; diagnostics pages
+4-6 (chi2 triangle + omegamh2 derived axis + GRAY CUT SHADING via
+_cut_exclusion; standardized-ln-PCA colored by chi2 AND by sparsity
+with fitted monomial + R^2; colors clipped to [-2, 1.5] band, sorted
+draw order, pinned colorbars); coverage histogram FD-binning fix.
+Factored-IA wired: model.name nla / nla_as (registry shares
+TemplateMLP -> exp.model_name disambiguates; AmplitudeFactorGeometry
+carry support + names + state round-trip; encoded_dim property +
+run_emulator getattr injection; nla_coeffs + AsScaledNLAChi2).
+RESULTS: resmlp 0.1558 / nla 0.1472 (winner) / nla_as 0.1559
+(abandoned) at T=256, 250k, in-window; runs 17 min at bs 768.
+DIAGNOSIS STATE: in-window coverage ISOTROPIC (sparsity fit R^2 0.01),
+hardness diffuse (R^2 0.18) -> levers are N (sweep, ~1M pool, 4x
+headroom) + representation (NEXT BUILD: rescnn_nla = TemplateMLP trunk
++ shared per-template ResCNN conv head, W_fd/W_df buffers + act_mid).
+REUSABLE METHOD: PDF forensics -- extract a getdist scatter's vector
+points + viridis-invert colors from the diagnostic PDF (PyMuPDF
+get_drawings + tick-label calibration), validated by the physical
+wedge identity; powered the omegam2h2 cut-scan without workstation
+access.

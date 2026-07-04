@@ -259,12 +259,14 @@ def main():
   parser.add_argument("--activation",
                       dest="activation",
                       help="ResBlock activation, fixed across the "
-                           "sweep: 'H' (default), 'power', 'multigate', "
-                           "or 'gated_power'",
+                           "sweep: 'H', 'power', 'multigate', or "
+                           "'gated_power'. Overrides the YAML "
+                           "train_args.model.activation; default: "
+                           "the YAML's choice, else 'H'",
                       type=str,
                       choices=["H", "power", "multigate",
                                "gated_power"],
-                      default="H")
+                      default=None)
   parser.add_argument("--n-gpus",
                       dest="n_gpus",
                       help="number of GPUs to spread the sweep across "

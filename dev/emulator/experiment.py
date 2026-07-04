@@ -33,7 +33,7 @@ from .data_staging import read_param_names, load_source, phys_cut_idx
 from .geometries_parameter import ParamGeometry, AmplitudeFactorGeometry
 from .loss_functions import make_chi2
 from .emulator_designs import ResMLP, ResCNN
-from .IA.emulator_designs import TemplateMLP
+from .IA.emulator_designs import TemplateMLP, TemplateResCNN
 from .IA.loss_functions import (TemplateFactoredChi2, nla_coeffs,
                                 AsScaledNLAChi2)
 from .activations import make_activation
@@ -43,15 +43,19 @@ from .training import (
 
 
 # model name (train_args.model.name) -> class, shared by the drivers.
-# ResCNN also needs the data geometry injected (it builds fixed full<->theta
-# basis-change buffers from it); ResMLP takes no geom. "nla" is the
-# factored intrinsic-alignment design: TemplateMLP emits three templates
-# from the non-amplitude inputs and the loss combines them in closed form
-# as K0 + A1*K1 + A1^2*K2, so the amplitude never enters the network
-# (exact generalization in A1; build_geometry swaps the input geometry
-# and the loss together).
+# "nla" is the factored intrinsic-alignment design: TemplateMLP emits
+# three templates from the non-amplitude inputs and the loss combines
+# them in closed form as K0 + A1*K1 + A1^2*K2, so the amplitude never
+# enters the network (exact generalization in A1; build_geometry swaps
+# the input geometry and the loss together). "rescnn_nla" is the same
+# factored design with a shared 1D-CNN correction head on the templates
+# (ResCNN's theta-order appendix, applied per template before the
+# combine). The classes carry capability flags build_geometry /
+# build_specs read: factored (AmplitudeFactorGeometry input + the
+# template-combining loss) and conv_head (geom injected for the fixed
+# full<->theta basis buffers; compile_mode defaulted to "default").
 MODELS = {"resmlp": ResMLP, "rescnn": ResCNN, "nla": TemplateMLP,
-          "nla_as": TemplateMLP}
+          "nla_as": TemplateMLP, "rescnn_nla": TemplateResCNN}
 
 # the amplitude column the NLA design factors out of the network input.
 # LSST_A1_1 is the NLA amplitude (enters xi as a linear field
@@ -136,10 +140,13 @@ class EmulatorExperiment:
                        transform "sqrt" / "chi2" / "sqrt_dchi2";
                      silent = optional (default False): silence the run.
                    Plus six constructible sub-blocks (each a mapping):
-                     model = the model's kwargs -- "name" (resmlp /
-                       rescnn; picks the class) plus int_dim_res, n_blocks,
-                       and for rescnn kernel_size / channels /
-                       n_blocks_cnn / gate_init;
+                     model = the model's kwargs -- "name" (resmlp / rescnn
+                       / nla / nla_as / rescnn_nla; picks the class),
+                       "activation" / "n_gates" (from_config / build_specs
+                       consume these, see the `activation` argument below)
+                       plus int_dim_res, n_blocks, and for the conv-headed
+                       models kernel_size / channels / n_blocks_cnn /
+                       gate_init;
                      optimizer = weight_decay (+ any extra AdamW kwargs);
                      lr = lr_base, bs_base, warmup_epochs (run sets
                        lr = lr_base * sqrt(bs / bs_base));
@@ -159,7 +166,11 @@ class EmulatorExperiment:
       use_amp    = run the forward in low-precision autocast (default False).
       rescale    = analytic-R mode forwarded to make_chi2 ("none" /
                    "rescaled" / "residual").
-      activation = ResBlock activation name (make_activation).
+      activation = ResBlock activation name (make_activation): "H" /
+                   "power" / "multigate" / "gated_power". from_config
+                   resolves the precedence: an explicit value here (the
+                   drivers' --activation) wins over the YAML's
+                   train_args.model.activation, which wins over "H".
       device     = compute device (default: pick_device()).
       quiet      = if True, silence the instance logger and the
                    per-source / per-epoch prints.
@@ -249,6 +260,13 @@ class EmulatorExperiment:
       raise ValueError(
         f"unknown train_args.model.name {name!r}; "
         f"choose one of {sorted(models)}")
+    # activation precedence, resolved once here: an explicit caller choice
+    # (the drivers' --activation flag; they pass None when the flag is
+    # absent) wins over the YAML's train_args.model.activation, which wins
+    # over the "H" default. build_specs strips the key from the model
+    # block (like name, it is not a model-constructor kwarg).
+    if kwargs.get("activation") is None:
+      kwargs["activation"] = str(ta["model"].get("activation", "H"))
     exp = cls(data=cfg["data"], train_args=ta,
               model_cls=models[name],
               raw_train_args=cfg["train_args"], **kwargs)
@@ -397,21 +415,24 @@ class EmulatorExperiment:
     """
     train_set = self.train_set if train_set is None else train_set
     d = self.data
+    # config validation first, before the cosmolike import below: a bad
+    # combination should fail fast, and stays testable off-workstation.
+    if getattr(self.model_cls, "factored", False) and self.rescale != "none":
+      raise ValueError(
+        f"model {self.model_name!r} does not compose with --rescale "
+        "(the factored loss owns the target construction)")
     # lazy import: DataVectorGeometry.from_cosmolike pulls in cosmolike,
     # which lives only on the workstation -- importing here keeps the module
     # importable for the config logic without cosmolike.
     from .geometries_output import DataVectorGeometry
 
     # The input whitening. The plain designs whiten every parameter
-    # (ParamGeometry); the factored NLA design instead whitens only the
-    # non-amplitude columns and appends the raw amplitude last
+    # (ParamGeometry); the factored designs (the models' factored flag:
+    # nla / nla_as / rescnn_nla) instead whiten only the non-amplitude
+    # columns and append the raw amplitude last
     # (AmplitudeFactorGeometry), so the model can drop it and the loss can
     # read it -- the amplitude never enters the network.
-    if self.model_cls is TemplateMLP:
-      if self.rescale != "none":
-        raise ValueError(
-          "model 'nla'/'nla_as' does not compose with --rescale (the "
-          "factored loss owns the target construction)")
+    if getattr(self.model_cls, "factored", False):
       # nla_as appends [As, A1] and CARRIES As (it stays whitened in
       # the input block); nla appends only A1, fully factored.
       if self.model_name == "nla_as":
@@ -445,11 +466,11 @@ class EmulatorExperiment:
       dataset=d["cosmolike_dataset"],
       probe=self.probe)
 
-    # The loss. The factored NLA design combines the model's three
+    # The loss. The factored designs combine the model's three
     # templates in closed form, xi = K0 + A1*K1 + A1^2*K2 (nla_coeffs),
     # reading each sample's own A1 off the encoded input's last column,
     # then scores the plain chi2 on the combined xi.
-    if self.model_cls is TemplateMLP:
+    if getattr(self.model_cls, "factored", False):
       if self.model_name == "nla_as":
         # as_ref = training-mean As (the C_mean entry of the As
         # column), the O(1) normalization of the Ats coefficient.
@@ -496,14 +517,19 @@ class EmulatorExperiment:
       the keyed spec dict run_emulator consumes as **specs.
     """
     train_args = self.train_args if train_args is None else train_args
-    # drop a leftover model.name before the spread: it picks the class, not
-    # a constructor arg, so it would reach the model constructor (from_config
-    # reads it without popping, a suggest_train_args result still carries the
-    # scalar name).
+    # drop the non-constructor keys before the spread: name picks the
+    # class, activation was already resolved by from_config (re-reading it
+    # here would let the YAML overrule an explicit --activation), and
+    # n_gates feeds make_activation below -- none is a model-constructor
+    # arg (from_config reads without popping, a suggest_train_args result
+    # still carries the scalars).
     ta = dict(train_args)
     model_opts = {}
+    n_gates = 3
     for k, v in ta["model"].items():
-      if k != "name":
+      if k == "n_gates":
+        n_gates = int(v)
+      elif k not in ("name", "activation"):
         model_opts[k] = v
     ta["model"] = model_opts
 
@@ -521,20 +547,26 @@ class EmulatorExperiment:
     # factory act(dim) -> nn.Module (the paper's H, or a Power / Gated /
     # GatedPower variant). A callable, so it cannot live in the YAML; inject
     # it into the ResBlock options (setdefault keeps config-set block_opts).
+    # n_gates (YAML model.n_gates, default 3) sizes the multi-gate families.
     specs["model_opts"].setdefault(
-      "block_opts", {})["act"] = make_activation(self.activation)
+      "block_opts", {})["act"] = make_activation(self.activation,
+                                                 n_gates=n_gates)
 
-    # ResCNN (emulator_designs.py) needs geom for its fixed full<->theta
-    # basis-change buffers; ResMLP takes none, so inject geom only for
-    # ResCNN.
-    if self.model_cls is ResCNN:
+    # Conv-headed models (the conv_head flag: ResCNN, TemplateResCNN)
+    # need geom for their fixed full<->theta basis-change buffers;
+    # ResMLP / TemplateMLP take none. compile_mode falls back to
+    # "default" for them (reduce-overhead's CUDA-graph capture trips on
+    # the gated skip-add); setdefault keeps a YAML-set choice.
+    if getattr(self.model_cls, "conv_head", False):
       specs["model_opts"]["geom"] = self.geom
+      specs["model_opts"].setdefault("compile_mode", "default")
 
-    # TemplateMLP (IA/emulator_designs.py) needs the factored-design
-    # shape: how many amplitude columns AmplitudeFactorGeometry appended
-    # (dropped from the trunk input) and how many templates to emit (3
-    # for NLA: GG, GI, II). setdefault keeps YAML-set overrides.
-    if self.model_cls is TemplateMLP:
+    # The factored models (IA/emulator_designs.py) need the
+    # factored-design shape: how many amplitude columns
+    # AmplitudeFactorGeometry appended (dropped from the trunk input)
+    # and how many templates to emit (3 for NLA: GG, GI, II).
+    # setdefault keeps YAML-set overrides.
+    if getattr(self.model_cls, "factored", False):
       n_amps = (len(NLA_AS_AMP_NAMES) if self.model_name == "nla_as"
                 else len(NLA_AMP_NAMES))
       specs["model_opts"].setdefault("n_amps", n_amps)

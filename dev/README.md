@@ -249,11 +249,16 @@ wrapped by whichever loss — never re-read, never inherited) and the
 **`needs_params` capability flag** (a future param-aware loss just sets the flag;
 nothing branches on `isinstance`).
 
-**5. Choose the model** (`emulator_designs.py`). `ResMLP` is the baseline: an
-input projection, a stack of residual blocks, an output projection. `ResCNN` adds
-a 1D-CNN correction on top of the ResMLP trunk, acting in *theta order* so a
-convolution can exploit smoothness along the angular axis. The model is picked in
-the YAML (`train_args.model.name = resmlp | rescnn`).
+**5. Choose the model** (`emulator_designs.py`, `IA/emulator_designs.py`).
+`ResMLP` is the baseline: an input projection, a stack of residual blocks, an
+output projection. `ResCNN` adds a 1D-CNN correction on top of the ResMLP trunk,
+acting in *theta order* so a convolution can exploit smoothness along the angular
+axis. The factored intrinsic-alignment designs emit templates the loss combines
+in closed form, so the IA amplitude never enters the network: `TemplateMLP`
+(`nla`, and `nla_as` which also factors the linear-order A_s) and
+`TemplateResCNN` (`rescnn_nla` = `nla` plus one shared theta-order CNN
+correcting each template). The model is picked in the YAML
+(`train_args.model.name = resmlp | rescnn | nla | nla_as | rescnn_nla`).
 
 **6. Feed the GPU** (`batching.py`). The staged data may or may not fit in GPU
 memory, so the loaders pick a regime — hold the whole encoded set resident on the
@@ -418,7 +423,8 @@ python $D/bakeoff_activation_emulator_cosmic_shear.py \
 The YAML has two blocks: `data` (bare input filenames resolved under
 `--root/chains`, the cut/split, the cosmolike dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, and the `model` /
 `optimizer` / `lr` / `scheduler` / `trim` / `focus` sub-blocks). Pick the model
-with `train_args.model.name` (`resmlp` | `rescnn`). The same YAML drives both
+with `train_args.model.name` (`resmlp` | `rescnn` | `nla` | `nla_as` |
+`rescnn_nla`). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
 list is searched. Templates live in `example_yamls/`; copy one into your
 `--fileroot` (e.g. `train_single_emulator_cosmic_shear.yaml`) and edit it.
