@@ -71,17 +71,39 @@ train_args:
   # trunk:                   # phase 1 (pure-trunk training)
   #   lr_base:   0.0025
   #   loss_mode: sqrt
-  #   trim:      {start: 0.1, end: 0.025, hold_epochs: 50,
-  #               anneal_epochs: 300, shape: cosine}
-  #   focus:     {start: 0.0, end: 2.0, hold_epochs: 50,
-  #               anneal_epochs: 300, shape: linear, kappa: 0.15}
+  #   trim:
+  #     start:         0.1
+  #     end:           0.01  # floor, never 0.0: the worst fraction
+  #                          # stays out of the loss forever
+  #     hold_epochs:   50
+  #     anneal_epochs: 400
+  #     shape:         cosine
+  #   focus:
+  #     start:         0.0
+  #     end:           2.0
+  #     hold_epochs:   50
+  #     anneal_epochs: 300
+  #     shape:         linear
+  #     kappa:         0.15
   # head:                    # phase 2 (frozen trunk, head only)
   #   lr_base:   0.001       # phase-2 base lr (same sqrt-batch rule)
-  #   loss_mode: chi2        # e.g. quadratic once outliers are gone
-  #   trim:      {start: 0.0, end: 0.0, hold_epochs: 1,
-  #               anneal_epochs: 1, shape: cosine}   # no trimming
-  #   focus:     {start: 0.0, end: 0.0, hold_epochs: 1,
-  #               anneal_epochs: 1, shape: linear, kappa: 0.15}
+  #   loss_mode: sqrt        # chi2 is sharper on the tail but needs
+  #                          # the trim floor + clip (an untrimmed
+  #                          # quadratic loss will fit the monster
+  #                          # tail at the bulk's expense)
+  #   trim:
+  #     start:         0.03
+  #     end:           0.01  # floor, never 0.0
+  #     hold_epochs:   15
+  #     anneal_epochs: 100
+  #     shape:         cosine
+  #   focus:                 # all-zero = focal weighting off in
+  #     start:         0.0   # phase 2 (omit the block entirely and
+  #     end:           0.0   # the head INHERITS the top-level focus
+  #     hold_epochs:   1     # schedule instead)
+  #     anneal_epochs: 1
+  #     shape:         linear
+  #     kappa:         0.15
   #   clip:      1.0         # bound per-step grads (chi2 + fat tail)
   #   rewind:    true        # self-heal after an excursion
 

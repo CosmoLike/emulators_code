@@ -58,7 +58,7 @@ train_args:
       n_blocks: [4, 2, 6, int]         # searched
     # activation: H          # type, fixed across the study (the
     #                        # --activation flag overrides); nest
-    #                        # {type: ..., n_gates: ...} for the
+    #                        # type: / n_gates: sub-keys for the
     #                        # multi-gate families
     # cnn:                   # name: rescnn only
     #   kernel_size: [11, 5, 21, int]
