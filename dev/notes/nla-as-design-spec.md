@@ -118,6 +118,32 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**CONV GROUPS: PHYSICAL CHANNEL CUTS (2026-07-04p; user: "I want
+groups=3 ... groups=2 (xi+ never mixes with xi-) ... and groups=6
+where GG GI II dont talk AND xi+ dont talk to xi-").** New
+model.cnn.groups key (default 1 = dense), passed to nn.Conv1d groups
+= consecutive channel blocks that never mix; conv params divide by
+groups (nla k=5: 40,590 / 13,590 / 6,840 at g = 1/3/6). Channel
+order makes the cuts physical -- verified in
+build_shear_angle_map's source: dv layout is pm outer (xi+ block
+then xi-), pairs middle, theta inner, so plain-head channels =
+xi+ pairs then xi- pairs, and the factored head is template-major
+with that same bin order inside each template. Allowed values are
+ENFORCED (anything else = loud error with the reason): plain rescnn
+1 | 2 (2 = xi branch cut); rescnn+nla 1 | n_templates |
+2*n_templates (3 = GG/GI/II isolated; 6 = that AND the xi cut).
+GOTCHA the implementation guards: bin_sizes drops fully-masked
+bins, so a wholly-masked bin on one branch would silently shift the
+xi boundary -- the branch cut therefore VALIDATES per-bin pm
+(geom.pm_kept run starts) at build and fails loudly if the halves
+are not clean xi+/xi-. Physics framing: dense mixing is the
+hypothesis that GG/GI/II residuals share structure; groups=3/6 are
+its ablations (amplitude exactness untouched either way -- the head
+acts before the loss combine). test_groups.py (12 checks: param
+scaling, perturbation isolation incl. dense control, loud
+rejections, shifted-boundary rejection, YAML mapping); full battery
+green.
+
 **TRUNK-VS-HEAD PARAM PRINT (2026-07-04o, user request).** Below the
 "trainable parameters: N (M excluding pure linear transformations)"
 banner line, run_emulator now prints "  trunk X vs head Y (excluding

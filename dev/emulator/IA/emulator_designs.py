@@ -216,9 +216,42 @@ class TemplateResCNN(nn.Module):
   the head's tensors never grow beyond the (padded) templates'
   size, so the bandwidth wall the old expand-to-C-filters head hit
   cannot occur by construction. Each block is one conv + one
-  activation; the only head hyperparameters are kernel_size and
-  n_blocks_cnn. The A1 exactness is untouched: it lives in the
-  loss's combine, and the head emits amplitude-blind templates.
+  activation. The head hyperparameters are kernel_size (+ the
+  rescale_kernel flag), n_blocks_cnn, groups, and gate_init. The
+  A1 exactness is untouched: it lives in the loss's combine, and
+  the head emits amplitude-blind templates (true for every groups
+  choice -- the head acts before the combine).
+
+  groups restricts that cross-bin + cross-template mixing along
+  the two physical cuts the channel order offers. The channels are
+  template-major (template, bin) pairs, and within each template
+  the bins run xi+ pairs then xi- pairs (cosmolike's dv layout,
+  reconstructed by build_shear_angle_map); a grouped conv splits
+  the channels into `groups` consecutive blocks that never mix:
+
+    channels (nla names drawn; T templates in general):
+
+      GG xi+ │ GG xi- ┃ GI xi+ │ GI xi- ┃ II xi+ │ II xi-
+
+    groups=1:    no cut -- every output reads every (template,
+                 bin) pair (the default: full mixing)
+    groups=T:    cuts at the ┃ -- GG / GI / II corrected in
+                 isolation, bins still mix within a template
+    groups=2*T:  cuts at ┃ and │ -- templates isolated AND xi+
+                 isolated from xi-; only bins of the same
+                 (template, branch) mix
+
+  (legend: T = n_templates (3 nla / 10 tatt); each drawn block
+  holds n_bins/2 = 15 source pairs; per-block conv parameters =
+  n_ch * (n_ch/groups) * kernel_size + n_ch with n_ch = T*n_bins,
+  so the cuts divide the conv weights by `groups`. Physics
+  framing: groups=1 encodes the hypothesis that the trunk's GG /
+  GI / II residuals share structure -- they come from the same
+  underlying power-spectrum integrals -- and groups=T / 2*T are
+  its ablations. The xi boundary is validated against geom.pm_kept
+  at build: bin_sizes drops fully-masked bins, so a wholly-masked
+  bin on one branch would silently shift the cut -- that fails
+  loudly instead.)
 
   The basis handling is ResCNN's: templates live in the full
   (cov-eigenbasis) whitening, which scrambles theta, so fixed
@@ -264,8 +297,8 @@ class TemplateResCNN(nn.Module):
 
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, kernel_size=11,
-               rescale_kernel=False, n_blocks=4, n_blocks_cnn=1,
-               gate_init=0.1, block_opts=None):
+               rescale_kernel=False, groups=1, n_blocks=4,
+               n_blocks_cnn=1, gate_init=0.1, block_opts=None):
     """Build the template trunk, the conv head, the buffers.
 
     Arguments:
@@ -294,6 +327,14 @@ class TemplateResCNN(nn.Module):
                      field n*(k-1)+1 >= kernel_size, see
                      rescale_kernel_size); the resolved width is
                      stored as self.kernel_size.
+      groups       = channel-mixing restriction: 1 (default,
+                     dense mixing), n_templates (GG / GI / II
+                     never mix), or 2*n_templates (templates
+                     isolated AND xi+ isolated from xi-). See the
+                     groups paragraph and graph in the class
+                     docstring; other values error, and the xi
+                     boundary is validated against geom.pm_kept
+                     at build.
       n_blocks     = residual blocks in the trunk.
       n_blocks_cnn = stacked conv+activation correction blocks.
       gate_init    = initial per-template correction scale. Small
@@ -359,6 +400,39 @@ class TemplateResCNN(nn.Module):
                                         n_blocks_cnn=n_blocks_cnn)
     # the resolved per-block width, inspectable after a rescale.
     self.kernel_size = int(kernel_size)
+
+    # groups: the channels are template-major (template, bin)
+    # pairs, so only the template cut (groups = n_templates) and
+    # the template+branch cut (groups = 2*n_templates) land on
+    # physical boundaries (see the docstring). For the branch cut,
+    # validate the bin layout against the geometry rather than
+    # assume it: each bin is a contiguous run of kept elements
+    # sharing one pm (0 = xi+, 1 = xi-); every template block
+    # repeats the same bin order, so checking the bin list once
+    # covers all templates.
+    assert groups in (1, n_templates, 2 * n_templates), (
+      f"TemplateResCNN groups must be 1 (dense), n_templates "
+      f"({n_templates}: templates never mix) or 2*n_templates "
+      f"({2 * n_templates}: templates never mix AND xi+ never "
+      "mixes with xi-); the channels are template-major, so no "
+      "other cut has a physical meaning")
+    if groups == 2 * n_templates:
+      assert hasattr(geom, "pm_kept") and self.n_bins % 2 == 0, (
+        "the branch cut needs geom.pm_kept "
+        "(build_shear_angle_map) and an even bin count")
+      pm_bins = []
+      start = 0
+      for s in sizes:
+        pm_bins.append(int(geom.pm_kept[start]))
+        start += s
+      half = self.n_bins // 2
+      assert (all(pm == 0 for pm in pm_bins[:half])
+              and all(pm == 1 for pm in pm_bins[half:])), (
+        "the branch cut needs the first half of each template's "
+        "bins to be xi+ and the second half xi- (a fully-masked "
+        "bin on one branch breaks the split); per-bin branches "
+        f"here: {pm_bins}")
+
     pad = (kernel_size - 1) // 2
     n_ch = n_templates * self.n_bins
     convs, acts = [], []
@@ -366,7 +440,8 @@ class TemplateResCNN(nn.Module):
       convs.append(nn.Conv1d(in_channels=n_ch,
                              out_channels=n_ch,
                              kernel_size=kernel_size,
-                             padding=pad))
+                             padding=pad,
+                             groups=groups))
       acts.append(cnn_act(self.max_bin))
     self.convs = nn.ModuleList(convs)
     self.acts  = nn.ModuleList(acts)

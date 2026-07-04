@@ -151,8 +151,29 @@ class ResCNN(nn.Module):
   expand-to-C-filters head hit cannot occur by construction. Each
   block is one conv + one activation (the nonlinearity between
   stacked blocks -- without it two convs fold into a single
-  kernel); the only head hyperparameters are kernel_size and
-  n_blocks_cnn.
+  kernel). The head hyperparameters are kernel_size (+ the
+  rescale_kernel flag), n_blocks_cnn, groups, and gate_init.
+
+  groups restricts that channel mixing along the one physical cut
+  the channel order offers. The channels are the bins in dv order
+  -- the xi+ pairs first, then the xi- pairs (cosmolike's layout,
+  reconstructed by build_shear_angle_map) -- and a grouped conv
+  splits the channels into `groups` consecutive blocks that never
+  mix:
+
+    channels:   xi+ pair 1 .. P │ xi- pair 1 .. P
+                                │
+    groups=1:   no cut -- every output bin reads every bin (the
+                default: full cross-bin mixing)
+    groups=2:   cut at the │ -- xi+ never mixes with xi-, but
+                bins still mix freely within their branch
+
+  (legend: P = n_bins/2 source pairs per xi branch; per-block conv
+  parameters = n_bins * (n_bins/groups) * kernel_size + n_bins, so
+  the cut also halves the head's conv weights. The boundary is
+  validated against geom.pm_kept at build: bin_sizes drops
+  fully-masked bins, so a wholly-masked bin on one branch would
+  silently shift the cut -- that fails loudly instead.)
 
   Bins differ in kept length, so each is padded to max_bin (the
   longest bin's kept theta count) inside a fixed index buffer
@@ -200,6 +221,12 @@ class ResCNN(nn.Module):
                    near-flat head parameters) instead of
                    over-growing the receptive field. The resolved
                    width is stored as self.kernel_size.
+    groups       = channel-mixing restriction: 1 (default, dense
+                   mixing) or 2 (xi+ never mixes with xi-). See
+                   the groups paragraph and graph in the class
+                   docstring; other values error, and the xi
+                   boundary is validated against geom.pm_kept at
+                   build.
     n_blocks     = residual blocks in the trunk.
     n_blocks_cnn = stacked conv+activation correction blocks.
     gate_init    = initial value of the scalar scaling the
@@ -220,8 +247,9 @@ class ResCNN(nn.Module):
   needs_bins = True
 
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
-               kernel_size=11, rescale_kernel=False, n_blocks=3,
-               n_blocks_cnn=1, gate_init=0.1, block_opts=None):
+               kernel_size=11, rescale_kernel=False, groups=1,
+               n_blocks=3, n_blocks_cnn=1, gate_init=0.1,
+               block_opts=None):
     super().__init__()
     if block_opts is None:
       block_opts = {}
@@ -271,13 +299,43 @@ class ResCNN(nn.Module):
                                         n_blocks_cnn=n_blocks_cnn)
     # the resolved per-block width, inspectable after a rescale.
     self.kernel_size = int(kernel_size)
+
+    # groups: only the xi-branch cut is a physical channel
+    # boundary here (see the docstring). Validate the layout
+    # against the geometry rather than assume it: each bin is a
+    # contiguous run of kept elements sharing one pm (0 = xi+,
+    # 1 = xi-), so the run starts give the per-bin branch; the
+    # first half of the bins must all be xi+ and the second half
+    # xi- (a fully-masked bin on one branch would silently shift
+    # the boundary -- fail loudly instead).
+    assert groups in (1, 2), (
+      "ResCNN groups must be 1 (dense) or 2 (xi+ never mixes "
+      "with xi-); the channels are single bins, so no other cut "
+      "has a physical meaning")
+    if groups == 2:
+      assert hasattr(geom, "pm_kept") and self.n_bins % 2 == 0, (
+        "groups=2 needs geom.pm_kept (build_shear_angle_map) and "
+        "an even bin count")
+      pm_bins = []
+      start = 0
+      for s in sizes:
+        pm_bins.append(int(geom.pm_kept[start]))
+        start += s
+      half = self.n_bins // 2
+      assert (all(pm == 0 for pm in pm_bins[:half])
+              and all(pm == 1 for pm in pm_bins[half:])), (
+        "groups=2 needs the first half of the bins to be xi+ and "
+        "the second half xi- (a fully-masked bin on one branch "
+        f"breaks the split); per-bin branches here: {pm_bins}")
+
     pad = (kernel_size - 1) // 2
     convs, acts = [], []
     for _ in range(n_blocks_cnn):
       convs.append(nn.Conv1d(in_channels=self.n_bins,
                              out_channels=self.n_bins,
                              kernel_size=kernel_size,
-                             padding=pad))
+                             padding=pad,
+                             groups=groups))
       acts.append(cnn_act(self.max_bin))
     self.convs = nn.ModuleList(convs)
     self.acts  = nn.ModuleList(acts)

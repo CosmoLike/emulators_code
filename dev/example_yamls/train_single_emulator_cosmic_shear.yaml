@@ -176,6 +176,18 @@ train_args:
     #                      # flat in depth. E.g. kernel_size 27 ->
     #                      # per-block k = 27 / 15 / 11 / 9 at
     #                      # n_blocks = 1 / 2 / 3 / 4.
+    #   groups:      1     # channel-mixing cuts (consecutive blocks
+    #                      # that never mix; conv params drop by the
+    #                      # same factor). Physical values only:
+    #                      #   plain rescnn (channels = bins):
+    #                      #     1 = dense; 2 = xi+ never mixes xi-
+    #                      #   rescnn + ia nla (channels = 3 x bins,
+    #                      #   template-major):
+    #                      #     1 = dense; 3 = GG/GI/II never mix;
+    #                      #     6 = templates isolated AND xi+
+    #                      #         isolated from xi-
+    #                      # anything else errors; the xi cut is
+    #                      # validated against the mask at build.
     #   n_blocks:    1     # stacked conv+activation blocks
     #   gate_init:   0.1   # initial correction scale (small, not 0)
     #
