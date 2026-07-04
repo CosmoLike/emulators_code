@@ -115,6 +115,7 @@ MODEL_BLOCK_KEYS = {
   "cnn": {"kernel_size":    "kernel_size",
           "rescale_kernel": "rescale_kernel",
           "groups":         "groups",
+          "separable":      "separable",
           "n_blocks":       "n_blocks_cnn",
           "gate_init":      "gate_init"},
   "trf": {"n_heads":      "n_heads",

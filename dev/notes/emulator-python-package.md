@@ -255,15 +255,23 @@ block must NOT have width (deleted knob) and n_heads must divide 26
 (use 2). (5) cocoa deploy: re-sync the WHOLE dev tree (models,
 building blocks, experiment, training, geometries_parameter,
 IA/loss_functions, parallel/ (activations.py DELETED), all 4 drivers,
-both example_yamls, README). SCOREBOARD (07-04l): rescnn+nla two-phase
-0.1105 (NEW BEST; head epoch 92 of the 1500+1500 T=256 run), nla
-trunk-only 0.1472, resmlp 0.1558, goal 0.10. That run's phase 2
-collapsed to frac ~0.305 after head epoch ~272 (untrimmed-chi2
-objective fit the monster tail at the bulk's expense -- full
-post-mortem in [[nla-as-design-spec]] 04l); best-restore saved the
-deliverable. Next-run config fix: head trim end: 0.01 (floor, never
-0.0). Diagnostics: remaining misses live in SPARSE train regions ->
-N_train sweep is the path below 0.10.
+both example_yamls, README). GOAL REFRAME (2026-07-04, user): the
+0.1105 rescnn+nla number (07-04l) is STALE -- do not treat it or
+"goal 0.10" as the target of the current runs. Current two-phase
+runs are "non-absurd tests" only: does training run end to end,
+handoff loss-continuous, no loss jumps/explosions. The REAL
+comparison arrives with TATT + w0wa dumps: that is where a
+ResMLP-only trunk demands many more training points and the lean
+factored conv head (rescale_kernel + groups; production smoke config
+07-04q: kernel_size 11 target, 2 blocks -> k=7, groups=6 -> head
+19,187 vs trunk 76,048 excluding-linear) is supposed to buy sample
+efficiency with structure, not capacity. TATT is one IA_DESIGNS
+entry when the template dumps exist (tatt_coeffs written; n_amps=3,
+n_templates=10; groups generalizes to 10 | 20 automatically).
+Historical context (07-04l run): phase 2 collapsed to frac ~0.305
+after head epoch ~272 (untrimmed-chi2 fit the monster tail; full
+post-mortem in [[nla-as-design-spec]] 04l); fixes since = head trim
+floor 0.01 + clip + rewind.
 
 ## Session 2026-07-03 (T=256 production day; the big feature batch)
 

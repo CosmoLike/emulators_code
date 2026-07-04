@@ -152,7 +152,8 @@ class ResCNN(nn.Module):
   block is one conv + one activation (the nonlinearity between
   stacked blocks -- without it two convs fold into a single
   kernel). The head hyperparameters are kernel_size (+ the
-  rescale_kernel flag), n_blocks_cnn, groups, and gate_init.
+  rescale_kernel flag), n_blocks_cnn, groups, separable, and
+  gate_init.
 
   groups restricts that channel mixing along the one physical cut
   the channel order offers. The channels are the bins in dv order
@@ -174,6 +175,33 @@ class ResCNN(nn.Module):
   validated against geom.pm_kept at build: bin_sizes drops
   fully-masked bins, so a wholly-masked bin on one branch would
   silently shift the cut -- that fails loudly instead.)
+
+  separable factors the remaining sum's two jobs -- smoothing
+  along theta and mixing channels -- into two cheaper layers per
+  block:
+
+    c  (B, C, max_bin)
+       │  depthwise Conv1d(C -> C, k, groups=C): each channel its
+       │  own k-tap theta filter, no mixing        C*k weights
+       ▼
+       │  pointwise Conv1d(C -> C, 1, groups=groups): mixes the
+       │  channels at each theta position          C*(C/groups)
+       ▼
+    act  (one activation per block, after the pointwise)
+
+  versus the plain block's joint C*(C/groups)*k. No activation
+  sits between the two layers, so the pair composes into a single
+  constrained conv -- weights w[o, c, t] = pointwise[o, c] *
+  depthwise[c, t] -- i.e. a low-rank factorization of the plain
+  block's sum, not a different operation. The assumption the
+  factorization adds: the theta-smoothing profile a channel needs
+  does not depend on which channel it mixes into (plausible for
+  covariance-driven leakage at like angular scales; the standard
+  depthwise-separable trade). The zero-init identity start moves
+  to the last block's pointwise layer.
+
+  (legend: C = n_bins, the channels; k = the per-block kernel
+  width after any rescale; B = batch rows.)
 
   Bins differ in kept length, so each is padded to max_bin (the
   longest bin's kept theta count) inside a fixed index buffer
@@ -227,6 +255,12 @@ class ResCNN(nn.Module):
                    docstring; other values error, and the xi
                    boundary is validated against geom.pm_kept at
                    build.
+    separable    = False (default): one joint conv per block.
+                   True: factor each block into a depthwise
+                   theta filter + a pointwise channel mix (a
+                   low-rank factorization of the same sum, ~k/2
+                   times fewer weights). See the separable
+                   paragraph and graph in the class docstring.
     n_blocks     = residual blocks in the trunk.
     n_blocks_cnn = stacked conv+activation correction blocks.
     gate_init    = initial value of the scalar scaling the
@@ -248,8 +282,8 @@ class ResCNN(nn.Module):
 
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
                kernel_size=11, rescale_kernel=False, groups=1,
-               n_blocks=3, n_blocks_cnn=1, gate_init=0.1,
-               block_opts=None):
+               separable=False, n_blocks=3, n_blocks_cnn=1,
+               gate_init=0.1, block_opts=None):
     super().__init__()
     if block_opts is None:
       block_opts = {}
@@ -331,21 +365,45 @@ class ResCNN(nn.Module):
     pad = (kernel_size - 1) // 2
     convs, acts = [], []
     for _ in range(n_blocks_cnn):
-      convs.append(nn.Conv1d(in_channels=self.n_bins,
-                             out_channels=self.n_bins,
-                             kernel_size=kernel_size,
-                             padding=pad,
-                             groups=groups))
+      if separable:
+        # depthwise-separable factorization (see the class
+        # docstring): a per-channel k-tap theta filter (groups =
+        # n_bins: no mixing), then a pointwise 1x1 channel mix
+        # honoring `groups`. No activation between the two -- the
+        # pair is a low-rank factorization of the plain block's
+        # conv, and the block's one activation follows as usual.
+        # Sequential keeps forward unchanged (convs[i] is callable
+        # either way).
+        convs.append(nn.Sequential(
+          nn.Conv1d(in_channels=self.n_bins,
+                    out_channels=self.n_bins,
+                    kernel_size=kernel_size,
+                    padding=pad,
+                    groups=self.n_bins),
+          nn.Conv1d(in_channels=self.n_bins,
+                    out_channels=self.n_bins,
+                    kernel_size=1,
+                    groups=groups)))
+      else:
+        convs.append(nn.Conv1d(in_channels=self.n_bins,
+                               out_channels=self.n_bins,
+                               kernel_size=kernel_size,
+                               padding=pad,
+                               groups=groups))
       acts.append(cnn_act(self.max_bin))
     self.convs = nn.ModuleList(convs)
     self.acts  = nn.ModuleList(acts)
 
-    # zero-init the last conv: corr = 0 at init (the activation maps
-    # 0 -> 0), so the model starts as its trunk exactly; the zeroed
-    # conv gets real gradients through the nonzero gate at step 1,
-    # earlier blocks wake one step later.
-    nn.init.zeros_(self.convs[-1].weight)
-    nn.init.zeros_(self.convs[-1].bias)
+    # zero-init the last mixing layer: corr = 0 at init (the
+    # activation maps 0 -> 0), so the model starts as its trunk
+    # exactly; the zeroed layer gets real gradients through the
+    # nonzero gate at step 1, earlier layers wake one step later.
+    # In a separable block the zero lives on the pointwise (second)
+    # conv; the depthwise filter keeps its init (zeroing both would
+    # zero the pointwise's input and stall its wake-up).
+    last = self.convs[-1][1] if separable else self.convs[-1]
+    nn.init.zeros_(last.weight)
+    nn.init.zeros_(last.bias)
 
     # learnable scalar gate on the correction (small init, not 0).
     self.gate = nn.Parameter(torch.tensor(float(gate_init)))

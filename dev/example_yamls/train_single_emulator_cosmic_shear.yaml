@@ -188,6 +188,11 @@ train_args:
     #                      #         isolated from xi-
     #                      # anything else errors; the xi cut is
     #                      # validated against the mask at build.
+    #   separable:   false # true = factor each block into a
+    #                      # depthwise theta filter + pointwise
+    #                      # channel mix (a low-rank factorization of
+    #                      # the same conv, ~k/2 times fewer weights;
+    #                      # composes with groups + rescale_kernel).
     #   n_blocks:    1     # stacked conv+activation blocks
     #   gate_init:   0.1   # initial correction scale (small, not 0)
     #

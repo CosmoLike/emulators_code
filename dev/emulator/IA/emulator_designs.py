@@ -217,7 +217,8 @@ class TemplateResCNN(nn.Module):
   size, so the bandwidth wall the old expand-to-C-filters head hit
   cannot occur by construction. Each block is one conv + one
   activation. The head hyperparameters are kernel_size (+ the
-  rescale_kernel flag), n_blocks_cnn, groups, and gate_init. The
+  rescale_kernel flag), n_blocks_cnn, groups, separable, and
+  gate_init. The
   A1 exactness is untouched: it lives in the loss's combine, and
   the head emits amplitude-blind templates (true for every groups
   choice -- the head acts before the combine).
@@ -252,6 +253,18 @@ class TemplateResCNN(nn.Module):
   at build: bin_sizes drops fully-masked bins, so a wholly-masked
   bin on one branch would silently shift the cut -- that fails
   loudly instead.)
+
+  separable factors each block's remaining sum -- smoothing along
+  theta and mixing channels -- into a depthwise per-channel k-tap
+  theta filter (n_ch*k weights) followed by a pointwise 1x1
+  channel mix honoring `groups` (n_ch*(n_ch/groups) weights),
+  versus the plain block's joint n_ch*(n_ch/groups)*k. With no
+  activation between them the pair composes into one constrained
+  conv, w[o, c, t] = pointwise[o, c] * depthwise[c, t] -- a
+  low-rank factorization of the same sum, ~k/2 times fewer
+  weights; the zero-init identity start moves to the last block's
+  pointwise. Full graph and the assumption it adds: see ResCNN's
+  separable paragraph (n_ch = n_templates * n_bins here).
 
   The basis handling is ResCNN's: templates live in the full
   (cov-eigenbasis) whitening, which scrambles theta, so fixed
@@ -297,8 +310,9 @@ class TemplateResCNN(nn.Module):
 
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, kernel_size=11,
-               rescale_kernel=False, groups=1, n_blocks=4,
-               n_blocks_cnn=1, gate_init=0.1, block_opts=None):
+               rescale_kernel=False, groups=1, separable=False,
+               n_blocks=4, n_blocks_cnn=1, gate_init=0.1,
+               block_opts=None):
     """Build the template trunk, the conv head, the buffers.
 
     Arguments:
@@ -335,6 +349,12 @@ class TemplateResCNN(nn.Module):
                      docstring; other values error, and the xi
                      boundary is validated against geom.pm_kept
                      at build.
+      separable    = False (default): one joint conv per block.
+                     True: factor each block into a depthwise
+                     theta filter + a pointwise channel mix (a
+                     low-rank factorization of the same sum,
+                     ~k/2 times fewer weights). See the separable
+                     paragraph in the class docstring.
       n_blocks     = residual blocks in the trunk.
       n_blocks_cnn = stacked conv+activation correction blocks.
       gate_init    = initial per-template correction scale. Small
@@ -437,11 +457,31 @@ class TemplateResCNN(nn.Module):
     n_ch = n_templates * self.n_bins
     convs, acts = [], []
     for _ in range(n_blocks_cnn):
-      convs.append(nn.Conv1d(in_channels=n_ch,
-                             out_channels=n_ch,
-                             kernel_size=kernel_size,
-                             padding=pad,
-                             groups=groups))
+      if separable:
+        # depthwise-separable factorization (see the class
+        # docstring): a per-channel k-tap theta filter (groups =
+        # n_ch: no mixing), then a pointwise 1x1 channel mix
+        # honoring `groups`. No activation between the two -- the
+        # pair is a low-rank factorization of the plain block's
+        # conv; the block's one activation follows as usual.
+        # Sequential keeps forward unchanged (convs[i] is callable
+        # either way).
+        convs.append(nn.Sequential(
+          nn.Conv1d(in_channels=n_ch,
+                    out_channels=n_ch,
+                    kernel_size=kernel_size,
+                    padding=pad,
+                    groups=n_ch),
+          nn.Conv1d(in_channels=n_ch,
+                    out_channels=n_ch,
+                    kernel_size=1,
+                    groups=groups)))
+      else:
+        convs.append(nn.Conv1d(in_channels=n_ch,
+                               out_channels=n_ch,
+                               kernel_size=kernel_size,
+                               padding=pad,
+                               groups=groups))
       acts.append(cnn_act(self.max_bin))
     self.convs = nn.ModuleList(convs)
     self.acts  = nn.ModuleList(acts)
@@ -460,9 +500,13 @@ class TemplateResCNN(nn.Module):
     # grows from 0 as soon as a correction helps; earlier blocks
     # wake up one step later. The standard zero-init-residual-branch
     # trick. Only the last conv is zeroed -- zeroing all would kill
-    # every gradient path.
-    nn.init.zeros_(self.convs[-1].weight)
-    nn.init.zeros_(self.convs[-1].bias)
+    # every gradient path. In a separable block the zero lives on
+    # the pointwise (second) conv; the depthwise filter keeps its
+    # init (zeroing both would zero the pointwise's input and
+    # stall its wake-up).
+    last = self.convs[-1][1] if separable else self.convs[-1]
+    nn.init.zeros_(last.weight)
+    nn.init.zeros_(last.bias)
 
     # training phase, set by set_train_phase: "joint" (default,
     # everything trains), "trunk" (head frozen AND bypassed -- the

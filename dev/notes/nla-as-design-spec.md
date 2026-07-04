@@ -118,6 +118,33 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**SEPARABLE CONV FLAG (2026-07-04r; user approved after a
+weighted-sum design review: "yes lets do that").** New
+model.cnn.separable bool (default false): each head block factors
+into depthwise Conv1d(C->C, k, groups=C) (per-channel k-tap theta
+filter, C*k weights) + pointwise Conv1d(C->C, 1, groups=groups)
+(channel mix, C*(C/groups) weights), NO activation between -- the
+pair composes into one constrained conv w[o,c,t] =
+pointwise[o,c]*depthwise[c,t], i.e. a low-rank factorization of the
+same weighted sum (~k/2 fewer weights), not a different operation.
+Added assumption: a channel's theta-smoothing profile is
+independent of which channel it mixes into (plausible for
+covariance-driven leakage; MobileNet/Xception trade). Zero-init
+identity start moves to the last block's pointwise (zeroing the
+depthwise too would stall the wake-up). Composes with groups (on
+the pointwise) and rescale_kernel (on the depthwise taps; RF math
+unchanged, pointwise k=1 adds no reach). At the smoke config (C=90,
+k=7, groups=6, 2 blocks): conv weights 19,080 -> 4,320 (head total
+~4.4k vs trunk 76k). DESIGN REVIEW banked with it: weighted sum
+kept as the base op (residuals small/signed/covariance-coupled ->
+additive linear mixing + H is the matching bias; stacked blocks
+already give nonlinear interactions); GLU-style multiplicative
+mixing REJECTED for now (2x params, no evidence of
+calibration-like multiplicative residuals -- revisit if
+diagnostics show whole-bin scale errors); max/pooling rejected
+(discards sign); attention = restrf, not a CNN flag.
+test_separable.py (10 checks) + full battery green.
+
 **CONV GROUPS: PHYSICAL CHANNEL CUTS (2026-07-04p; user: "I want
 groups=3 ... groups=2 (xi+ never mixes with xi-) ... and groups=6
 where GG GI II dont talk AND xi+ dont talk to xi-").** New
@@ -201,7 +228,12 @@ trunk:/head: blocks; the phase banner notes overrides. Tests:
 test_clip_rewind.py (7 checks: spy-optimizer norm bound, rewind
 restores best weights at reduced lr, no-rewind control, per-phase
 threading). Advice for the next chi2-head run: head {trim end 0.01,
-clip 1.0} + rewind true.
+clip 1.0} + rewind true. VERIFIED IN PRODUCTION (07-04 smoke run,
+trunk phase, user: "worked nicely"): epoch 1096 plateau cut ->
+"rewound to best epoch 1094 (frac>0.2 0.1484), resuming at lr
+6.39e-05"; the two drifted epochs were erased and the next epochs
+immediately matched the best -- the healthy-plateau case is a
+near-no-op exactly as designed.
 
 **CONV-AS-MATMUL REVERTED (2026-07-04m addendum to 04k).** On the
 production GPU the matmul path changed nothing (head epochs 2.9 ->
