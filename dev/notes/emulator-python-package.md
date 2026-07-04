@@ -205,6 +205,54 @@ and naming convention, the faithful-port + verify methodology, the new
 construction helpers, and the search-range convention -- so the next session
 edits the package directly instead of re-deriving where everything went.
 
+## Session 2026-07-04 (architecture day; full design history in
+## [[nla-as-design-spec]], blocks 04c..04j)
+
+THE INTERFACE NOW (all verified, 5 venv suites green; NOT yet run in
+production): train_args.model = {name: resmlp|rescnn|restrf, ia:
+absent|nla (tatt reserved), mlp: {width, n_blocks} (required),
+activation: {type, n_gates} or bare string, cnn: {kernel_size,
+n_blocks, gate_init}, trf: {n_heads, n_blocks, n_mlp_blocks,
+shared_mlp, gate_init}, compile_mode}. MODELS keyed by (name, ia);
+IA_DESIGNS + MODEL_BLOCK_KEYS + ARCH_HEAD in experiment.py. INACTIVE
+head blocks silently ignored (switch models by name: alone); unknown
+keys in ACTIVE blocks are loud errors; old flat keys error.
+run_tag/display names unchanged (rescnn_nla etc.).
+
+MODELS: ResCNN = bins-as-channels single kernel (Conv1d G->G; nla
+T*G->T*G; pad_idx scatter/gather; only kernel_size+n_blocks; tensors
+never exceed padded dv -> bandwidth-safe by construction). ResTRF =
+bin tokens at NATURAL width max_bin, NO embed/out adapters (paper's
+adapters existed only for its synthetic latent sequence), nla =
+(template,bin) pairs = 90 tokens, n_heads must divide max_bin
+(26->1|2|13, default 2), per-token unique MLPs (BinLinear) or
+shared_mlp: true (textbook ablation; position-blind -- see TO
+DISCUSS), TRFBlock == identity at init (zeroed branch outputs),
+corr = blocks(h)-h. All correction heads zero-init identity;
+set_train_phase on the Template variants -> trunk_epochs two-phase +
+SYMMETRIC trunk:/head: per-phase override blocks (lr_base/loss_mode/
+trim/focus over shared defaults; either without trunk_epochs>0
+raises).
+
+TRAINING-LOOP FIXES (04j, found by the user's 300+700 test): warmup
+lr now applied BEFORE each epoch (was after -> epoch 1 of every pass
+trained at FULL base lr, wrecking the phase-2 handoff); baseline
+epoch-0 eval seeds best-tracking (a pass can never end worse than it
+started; new "epoch 0 baseline" stdout line).
+
+RESUME STATE: (1) rerun two-phase rescnn+nla with the fixed loop;
+head block advice = gate_init 0.1, chi2 + small annealed trim (start
+0.05 -> 0) until the trunk is mature; expect phase-2 epoch 1 ~=
+phase-1 best now. (2) restrf first runs (bin tokens; expect near-nla
+epoch cost). (3) POSITIONAL-ENCODING discussion pending (see TO
+DISCUSS in [[nla-as-design-spec]]). (4) production YAML gotchas: trf
+block must NOT have width (deleted knob) and n_heads must divide 26
+(use 2). (5) cocoa deploy: re-sync the WHOLE dev tree (models,
+building blocks, experiment, training, geometries_parameter,
+IA/loss_functions, parallel/ (activations.py DELETED), all 4 drivers,
+both example_yamls, README). Scoreboard unchanged: resmlp 0.1558,
+nla 0.1472, goal 0.10.
+
 ## Session 2026-07-03 (T=256 production day; the big feature batch)
 
 LATE ADDITIONS (same day, after the rescnn_nla build): activation is
