@@ -33,6 +33,23 @@ train_args:
   loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
   silent:    false       # false -> per-epoch progress lines
 
+  # Stability guards (both optional, both default OFF; the trunk: /
+  # head: blocks below can override either per phase).
+  # clip = per-step gradient-norm ceiling: the full gradient vector
+  # is rescaled to norm <= clip before each optimizer step (same
+  # direction, bounded size), so one monster-outlier batch cannot
+  # kick the weights -- the train-loss-spike epochs a quadratic
+  # (chi2) loss produces on a fat-tailed training set. 0 = off.
+  # rewind = on every plateau-scheduler lr cut, reload the
+  # best-so-far weights AND the optimizer state snapshotted with
+  # them, keeping the new (reduced) lr. At a true plateau this is a
+  # no-op (best ~= current); after an excursion into a bad basin it
+  # is the rescue -- the run resumes from its best point at most
+  # `patience` epochs after the damage, instead of decaying the lr
+  # inside the wreckage and freezing there. Plateau scheduler only.
+  # clip:   1.0
+  # rewind: true
+
   # Two-phase schedule (a factored correction head: name rescnn |
   # restrf + ia: nla; omit or 0 = joint training).
   # Phase 1 (epochs 1..trunk_epochs): the correction head is bypassed,
@@ -45,12 +62,12 @@ train_args:
   # trunk_epochs: 1500
 
   # Per-phase overrides, SYMMETRIC (both need trunk_epochs > 0; error
-  # otherwise). The top-level loss_mode / lr / trim / focus below are
-  # the shared defaults; the trunk: block overrides them for phase 1
-  # and the head: block for phase 2. Every key is optional and falls
-  # back to the shared value; trim / focus are FULL replacement blocks
-  # (same keys as the main ones, incl. kappa -- no merging),
-  # restarting at the phase's own epoch 1.
+  # otherwise). The top-level loss_mode / lr / trim / focus / clip /
+  # rewind are the shared defaults; the trunk: block overrides them
+  # for phase 1 and the head: block for phase 2. Every key is
+  # optional and falls back to the shared value; trim / focus are
+  # FULL replacement blocks (same keys as the main ones, incl. kappa
+  # -- no merging), restarting at the phase's own epoch 1.
   # trunk:                   # phase 1 (pure-trunk training)
   #   lr_base:   0.0025
   #   loss_mode: sqrt
@@ -65,6 +82,8 @@ train_args:
   #               anneal_epochs: 1, shape: cosine}   # no trimming
   #   focus:     {start: 0.0, end: 0.0, hold_epochs: 1,
   #               anneal_epochs: 1, shape: linear, kappa: 0.15}
+  #   clip:      1.0         # bound per-step grads (chi2 + fat tail)
+  #   rewind:    true        # self-heal after an excursion
 
   model:
     # Two orthogonal choices pick the model class; the other keys are

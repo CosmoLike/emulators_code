@@ -159,3 +159,26 @@ paren-align wrapped calls at 90 cols, and add a few lines explaining any
 non-obvious reshape/broadcast. Validate the keyword names mechanically against
 the real signatures (a quick ast pass) -- a wrong name compiles but breaks at
 call time.
+
+**SHAPE-FLOW DIAGRAMS IN DOCSTRINGS (2026-07-04, user: "I love this
+SO MUCH you should go to other files and add similar graphs").**
+Docstring-level vertical diagrams for any multi-step tensor pipeline:
+nodes = named tensors with shape + short meaning, edges = `│` lines
+carrying the operation + annotation, `▼` into the next node. TWO HARD
+RULES: (1) end EVERY diagram with a `(legend: ...)` defining every
+symbol it used — an undefined symbol (a bare n_keep) is a magic
+number in graphical form, and the user flags it ("you dont explain
+what n_keep is — remember you need to explain your variables");
+(2) magic numbers only as named-symbol derivations with the LSST-Y1
+run as a concrete EXAMPLE (max_bin = 26; C = n_templates*n_bins =
+3*30 = 90), never as bare constants. Worked examples now live in:
+emulator_designs.py (module pipeline graph + ResMLP/ResCNN/ResTRF
+forwards), emulator_designs_building_blocks.py (ResBlock, TRFBlock
+attention flow), IA/emulator_designs.py (TemplateMLP + factored
+twins incl. phase branches), loss_functions.py (CosmolikeChi2 flow),
+IA/loss_functions.py (TemplateFactoredChi2 combine with merging
+amplitude branch), geometries_parameter.py / geometries_output.py
+(whiten chains), training.py (run_emulator two-phase timeline),
+experiment.py (exp.run orchestration). Also banked in the
+pytorch-teaching-style SKILL ("Shape-flow diagrams" section, format
+spec + trigger) and the auto-memory (shape-flow-diagrams.md).

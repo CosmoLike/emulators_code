@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from ..activations import activation_fcn
 from ..emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock, conv1d_as_matmul)
+  Affine, ResBlock, TRFBlock)
 
 
 class NLATemplateMLP(nn.Module):
@@ -82,6 +82,26 @@ class TemplateMLP(nn.Module):
   n_templates*n_keep, reshapes to (B, n_templates, n_keep). NLA:
   n_amps=1, n_templates=3; TATT: n_amps=3, n_templates=10.
 
+    x  (B, input_dim)            encoded params; the last n_amps
+       │                         columns = raw amplitudes, read by
+       │                         the loss only
+       │  drop the amplitudes [:, :-n_amps]; ResMLP layer stack
+       ▼
+    h  (B, T * n_keep)           all templates, flat
+       │  view: one slice per template (no copy)
+       ▼
+    t  (B, T, n_keep)            whitened templates, coeff_fn order
+       │  in the LOSS (TemplateFactoredChi2), not in the model:
+       │  xi = sum_t coeff_t(A) * t_t, then chi2 vs the truth
+       ▼
+    chi2
+
+  (legend: B = batch rows; input_dim = encoded width including the
+  n_amps appended amplitude columns; T = n_templates (3 nla / 10
+  tatt); n_keep = kept dv length = output_dim, one template's width;
+  coeff_t(A) = the closed-form amplitude polynomial of the raw
+  amplitudes A -- nla_coeffs / tatt_coeffs in IA/loss_functions.py.)
+
   factored = True is a capability flag (like the losses'
   needs_params): EmulatorExperiment reads it to pick the
   AmplitudeFactorGeometry input encoding and the template-combining
@@ -156,6 +176,35 @@ class TemplateResCNN(nn.Module):
   Why correct the templates, not the combined xi: correcting after
   the combine would need the amplitudes in the network, surrendering
   the exact generalization the factoring buys.
+
+    x  (B, input_dim)            encoded params; the last n_amps
+       │                         columns = raw amplitudes, loss-only
+       │  trunk = the TemplateMLP stack on [:, :-n_amps]
+       │  (phase "head": run under no_grad, trunk frozen)
+       ▼
+    y  (B, T, n_keep)            whitened templates (also the skip;
+       │                         phase "trunk" returns y here)
+       │  @ W_fd                 f -> d: theta order, /sigma
+       ▼
+       │  pad_idx scatter        pad slots stay zero
+       ▼
+    c  (B, T*n_bins, max_bin)    (template, bin) pairs = channels
+       │  n_blocks_cnn x [Conv1d + act]
+       ▼
+       │  pad_idx gather         drop the pad slots
+       ▼
+    corr (B, T, n_keep)
+       │  @ W_df                 d -> f, back to full whitening
+       ▼
+    out = y + gate * corr        per-template gate (T scalars);
+                                 corr = 0 at init (identity start)
+
+  (legend: B = batch rows; T = n_templates (3 nla / 10 tatt);
+  n_keep = kept dv length = output_dim, one template's width;
+  n_bins = tomographic (xi+/-, source-pair) bins; max_bin = the
+  longest bin's kept theta count = the padded width; f / d = the
+  full-whitened / diagonal-theta bases, see the W_fd buffer
+  comments; phases = set_train_phase, see its docstring.)
 
   The head is ResCNN's bins-as-channels design with the templates
   joining the channel axis: each template's theta-order dv splits
@@ -401,7 +450,9 @@ class TemplateResCNN(nn.Module):
       return y
     # theta order per template (the matmul broadcasts over (B, T)),
     # then scatter into the padded per-bin layout: the (template,
-    # bin) pairs become the conv channels.
+    # bin) pairs become the conv channels. (reminder: W_fd = f -> d,
+    # full-whitened -> diagonal theta order; W_df = d -> f, its
+    # inverse -- subscripts read in multiply order.)
     h = y @ self.W_fd                         # (B, T, n_keep) theta
     padded = h.new_zeros(B, self.n_templates,
                          self.n_bins * self.max_bin)
@@ -410,12 +461,10 @@ class TemplateResCNN(nn.Module):
                     self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      # cross-bin+template; the conv runs as a matmul (identical
-      # map, ~25x faster at this conv shape -- see conv1d_as_matmul).
-      c = self.acts[i](conv1d_as_matmul(self.convs[i], c))
+      c = self.acts[i](self.convs[i](c))      # cross-bin+template
     # gather the real entries back out of the padding (per
-    # template), return to the full-whitened basis, add through the
-    # per-template gate.
+    # template), return to the full-whitened basis (reminder:
+    # @ W_df goes d -> f), add through the per-template gate.
     c = c.view(B, self.n_templates, self.n_bins * self.max_bin)
     corr = c[..., self.pad_idx]               # (B, T, n_keep)
     return y + self.gate * (corr @ self.W_df)
@@ -444,9 +493,38 @@ class TemplateResTRF(nn.Module):
   inside a fixed pad_idx buffer (scatter to pad, gather to unpad;
   pad slots stay zero).
 
+    x  (B, input_dim)            encoded params; the last n_amps
+       │                         columns = raw amplitudes, loss-only
+       │  trunk = the TemplateMLP stack on [:, :-n_amps]
+       │  (phase "head": run under no_grad, trunk frozen)
+       ▼
+    y  (B, T, n_keep)            whitened templates (also the skip;
+       │                         phase "trunk" returns y here)
+       │  @ W_fd                 f -> d: theta order, /sigma
+       ▼
+       │  pad_idx scatter        pad slots stay zero
+       ▼
+    t0 (B, T*n_bins, max_bin)    one token per (template, bin) pair
+       │  n_blocks_trf x TRFBlock
+       │                         cross-bin AND cross-template
+       │                         attention + per-token MLPs
+       ▼
+    t  (B, T*n_bins, max_bin)
+       │  corr = t - t0          what the blocks added (0 at init)
+       │  pad_idx gather, @ W_df     d -> f, back to full whitening
+       ▼
+    out = y + gate * corr        per-template gate (T scalars)
+
+  (legend: B = batch rows; T = n_templates (3 nla / 10 tatt);
+  n_keep = kept dv length = output_dim, one template's width;
+  n_bins = tomographic (xi+/-, source-pair) bins; max_bin = the
+  longest bin's kept theta count = the padded token width; f / d =
+  the full-whitened / diagonal-theta bases, see the W_fd buffer
+  comments; phases = set_train_phase, see TemplateResCNN's.)
+
   The correction is corr = blocks(h) - h: every TRFBlock is exactly
   the identity at init (zero-initialized branch outputs, see
-  TRFBlock), so corr = 0 and the model IS its trunk at epoch 1 --
+  TRFBlock), so corr = 0 and the model equals its trunk at epoch 1 --
   enabling the two-phase schedule (train_args.trunk_epochs,
   orchestrated by run_emulator via set_train_phase): first the
   trunk alone with the head bypassed (pure-TemplateMLP cost), then
@@ -484,8 +562,9 @@ class TemplateResTRF(nn.Module):
                      bin_sizes; its evecs / sqrt_ev define the
                      basis buffers.
       n_heads      = attention heads per TRFBlock; must divide the
-                     token width max_bin (a bin length of 26 allows
-                     1 / 2 / 13; default 2).
+                     token width max_bin (the LSST-Y1 cosmic-shear
+                     run keeps max_bin = 26 theta points per bin,
+                     allowing n_heads = 1, 2, or 13; default 2).
       n_blocks     = residual blocks in the trunk.
       n_blocks_trf = stacked transformer blocks.
       n_mlp_blocks = depth of each token's private MLP stack inside
@@ -630,7 +709,9 @@ class TemplateResTRF(nn.Module):
       return y
 
     # theta order per template (the matmul broadcasts over (B, T)),
-    # then scatter into the padded per-bin layout.
+    # then scatter into the padded per-bin layout. (reminder: W_fd =
+    # f -> d, full-whitened -> diagonal theta order; W_df = d -> f,
+    # its inverse -- subscripts read in multiply order.)
     h = y @ self.W_fd                        # (B, T, n_keep)
     padded = h.new_zeros(B, self.n_templates,
                          self.n_bins * self.max_bin)
@@ -644,11 +725,11 @@ class TemplateResTRF(nn.Module):
     t = t0
     for blk in self.trf:
       t = blk(t)                    # cross-bin + cross-template
-    # the correction is what the blocks ADDED (t - t0 = 0 at init:
+    # the correction is what the blocks added (t - t0 = 0 at init:
     # every block starts as the identity). Unpack the tokens back to
     # (B, T, G*max_bin), gather the real entries out of the padding,
-    # return to the full-whitened basis, add through the
-    # per-template gate.
+    # return to the full-whitened basis (reminder: @ W_df goes
+    # d -> f), add through the per-template gate.
     corr = (t - t0).view(B, self.n_templates,
                          self.n_bins * self.max_bin)
     corr = corr[..., self.pad_idx]           # (B, T, n_keep)

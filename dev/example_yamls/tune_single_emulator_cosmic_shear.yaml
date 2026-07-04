@@ -40,6 +40,10 @@ train_args:
   nepochs:   900         # lower than training -> faster trials
   bs:        256
   loss_mode: sqrt
+  # clip:   1.0          # per-step gradient-norm ceiling (0 / absent
+  #                      # = off); rewind = reload best weights +
+  # rewind: true         # optimizer on every plateau lr cut. See the
+  #                      # training YAML for the full explanation.
 
   model:                 # name + ia pick the class; nested sub-blocks
     # name = the ARCHITECTURE (resmlp | rescnn | restrf); ia = the factored

@@ -4,7 +4,27 @@ This class factors the driver setup boilerplate (parse the config, pick the
 device, stage the sources, build the parameter + data-vector geometries and
 the chi2, assemble the run_emulator spec dicts, train) into one reusable
 object a driver or sweep script (over N_train, or one hyperparameter) need
-not copy.
+not copy. What exp.run() orchestrates:
+
+    YAML config
+       │  from_yaml / from_config   validate blocks, collapse search
+       │                            ranges, (name, ia) -> model class
+       ▼
+    stage_train / stage_val         load the dumps, apply the physics
+       │                            cuts, split the rows
+       ▼
+    build_geometry                  ParamGeometry (whiten in) +
+       │                            DataVectorGeometry (whiten out)
+       │                            + the chi2 (one cosmolike read);
+       │                            needs_bins models also get the
+       │                            shear angle map (bin_sizes)
+       ▼
+    train                           build_specs -> run_emulator
+       │                            (model / optimizer / scheduler /
+       │                            loaders; one- or two-phase)
+       ▼
+    model + histories on the instance, ready for diagnostics
+       (frac_above, eval_source_chi2, plotting)
 
 Build it from a YAML file (from_yaml) or a parsed config mapping (from_config,
 e.g. load the YAML once and rebuild from a tweaked copy per sweep point); both
@@ -749,6 +769,15 @@ class EmulatorExperiment:
       trunk_epochs=train_args.get("trunk_epochs", 0),
       trunk_opts=train_args.get("trunk"),
       head_opts=train_args.get("head"),
+      # stability guards (both default off; the trunk: / head:
+      # blocks can override either per phase): clip = per-step
+      # gradient-norm ceiling (kills single-batch kicks from
+      # monster outliers under a quadratic loss); rewind = on every
+      # plateau lr cut reload the best weights + optimizer
+      # snapshot, so an excursion into a bad basin costs at most
+      # `patience` epochs instead of freezing the run there.
+      clip=train_args.get("clip", 0.0),
+      rewind=train_args.get("rewind", False),
       thresholds=self.thresholds,
       use_amp=self.use_amp,
       silent=silent_run,

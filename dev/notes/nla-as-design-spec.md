@@ -118,6 +118,77 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**CLIP + REWIND STABILITY GUARDS (2026-07-04m; user: "how to
+implement both").** Two new YAML knobs, top-level with symmetric
+trunk:/head: per-phase overrides (both default off): clip = per-step
+gradient-norm ceiling (nn.utils.clip_grad_norm_ over
+model.parameters() between backward and step; frozen params have
+grad None and are skipped) -- kills the single-batch kicks (train
+10517 epochs) any loss mode can produce on the fat tail; rewind = on
+every ReduceLROnPlateau lr cut, model.load_state_dict(best_state) +
+optimizer.load_state_dict(best-epoch snapshot) then REAPPLY the new
+reduced lrs (load_state_dict would bring back the old lr). Optimizer
+snapshot (copy.deepcopy, only when rewind on) is taken wherever
+best_state is -- baseline seed + every new best -- because Adam
+moments from a bad basin would kick restored weights right back out.
+Rewind is plateau-scheduler-only BY DESIGN (a cosine/step scheduler
+changes lr every epoch; rewinding on each change would pin the run
+to its best forever). At a true plateau rewind is a no-op (best ~=
+current); after an excursion it bounds the damage to `patience`
+epochs -- the exact fix for 04l's 1200 frozen epochs. Threading:
+training_loop_batched(clip, rewind) <- run_emulator(clip, rewind +
+phase_opts.get) <- exp.train (train_args.get) <- YAML top level or
+trunk:/head: blocks; the phase banner notes overrides. Tests:
+test_clip_rewind.py (7 checks: spy-optimizer norm bound, rewind
+restores best weights at reduced lr, no-rewind control, per-phase
+threading). Advice for the next chi2-head run: head {trim end 0.01,
+clip 1.0} + rewind true.
+
+**CONV-AS-MATMUL REVERTED (2026-07-04m addendum to 04k).** On the
+production GPU the matmul path changed nothing (head epochs 2.9 ->
+3.0s; epoch-1 compile grew 4.3 -> 15.8s -- the unfold graph compiles
+slower). Post-mortem: the ~1%-of-matmul conv pathology was CPU-EAGER
+only; on the GPU cuDNN/inductor handle the shape fine, and the
+already-observed head/trunk ratio 3.9x < arithmetic ratio ~10x had
+said so. The head phase there is at its arithmetic floor (~6.4
+TFLOP/epoch at 3.0s ~ 2.1 TFLOP/s sustained on a small-SM card --
+the log's "Not enough SMs" warning). User: "I prefer to use pytorch
+cnn own functions" -> conv1d_as_matmul DELETED from building blocks,
+both forwards back to self.convs[i](c) (resurrect from git history
+if a CPU/MPS path ever matters). Lesson banked: benchmark
+conclusions do not transfer across devices; the honest floor
+argument (head does ~10x trunk MACs) was the real story all along.
+Speed levers that DO exist: smaller kernel_size / fewer conv blocks,
+larger bs.
+
+**FIRST FULL TWO-PHASE PRODUCTION RUN: 0.1105 (2026-07-04l).** rescnn
++nla, T=256 N_train=250k, 1500 trunk + 1500 head (bs 768, head chi2
+lr_base 1e-3, head trim 0.05 -> 0.0 hold 20 anneal 100): BEST frac>0.2
+= 0.1105 at HEAD EPOCH 92 (val med 0.035) -- scoreboard nla-trunk-only
+was 0.1472, so the conv head cut misses ~25%; goal 0.10 close.
+Best-restore returned epoch 92, so the deliverable survived what came
+next. COLLAPSE POST-MORTEM (user: "stuck on frac ~0.3 -- how to
+avoid"): head trim hit 0.0 at epoch 120; with trim 0 the train MEAN
+chi2 was ~79 vs MEDIAN ~0.05 -- the quadratic loss was ~entirely a few
+monster outliers. Spikes began (169: train 10517; 225: 2323), a big
+excursion at head epochs ~272-300 knocked it into a tail-fitting
+basin, and from there train loss kept IMPROVING (79 -> 52) while val
+med rose 0.035 -> 0.142 and frac froze at ~0.305 for 1200 epochs: the
+untrimmed-chi2 objective genuinely prefers sacrificing the bulk to
+shave monsters -- it anti-correlates with frac>0.2. ReduceLROnPlateau
+then decayed lr to 5e-8 while stuck, freezing the bad basin (no
+recovery mechanism). FIXES: (1) YAML, primary: head trim needs a FLOOR
+(end: 0.01, never 0.0) -- the objective, not the optimizer, was wrong;
+(2) candidate loop upgrades (not yet implemented): grad-norm clip
+knob; rewind-to-best-weights whenever the plateau scheduler cuts lr
+(bounds any excursion to `patience` epochs). Diagnostics PDF: bad
+points (dchi2>0.2) skew to LARGER mean-dist-to-8-nearest-train-pts --
+the residual 11% lives in sparse train regions, so N_train sweep is
+the likely path below 0.10. Head params at this config (k=11, 3
+blocks, ch=90): convs 267,570 + acts 156 + gates 3 = 267,729 (trunk
+304,182; total 571,911). NOTE this run still used the OLD Conv1d path
+(2.9s/epoch) -- re-sync for conv-as-matmul before the next one.
+
 **CONV RUNS AS A MATMUL (2026-07-04k; user: head epochs 2.9s vs trunk
 0.7s, "please investigate").** Root cause was NOT compile/no_grad/
 scatter (all measured innocent, <2ms each): nn.Conv1d(90->90, k=11)

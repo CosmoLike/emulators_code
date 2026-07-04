@@ -1,14 +1,20 @@
 """Shared nn building blocks (Affine, ResBlock, BinLinear, TRFBlock).
 
-The small nn.Modules the emulator models are assembled from. Affine is a
-learnable per-output scale and shift (the default ResBlock "norm" and the
-models' final layer). ResBlock is a width-preserving residual block (n
-dense layers, each with a norm and activation factory, skip added before
-the last). BinLinear and TRFBlock are the ResTRF head's pieces: per-bin
-unique linears and a transformer block whose tokens are the tomographic
-bins. conv1d_as_matmul runs the ResCNN heads' bare nn.Conv1d layers as
-a single matmul (same parameters, same output; the heads' conv shape is
-pathologically slow on the native conv kernels). Grouped / per-bin conv
+The small nn.Modules the emulator models (emulator_designs.py) are
+assembled from. Where each piece sits:
+
+  ResMLP = Linear -> n_blocks x ResBlock -> Linear -> Affine
+  ResCNN = ResMLP trunk + conv correction head (bare nn.Conv1d
+             layers, needing no block here)
+  ResTRF = ResMLP trunk + TRFBlock correction head
+             (per-token unique MLPs = BinLinear)
+
+Affine is a learnable scalar scale and shift (the default ResBlock
+"norm" and the models' final layer). ResBlock is a width-preserving
+residual block (n dense layers, each with a norm and activation
+factory, skip added before the last). BinLinear and TRFBlock are the
+ResTRF head's pieces: per-token unique linears and a transformer
+block whose tokens are the tomographic bins. Grouped / per-bin conv
 twins live in parallel/.
 """
 
@@ -46,27 +52,35 @@ class Affine(nn.Module):
 
 
 class ResBlock(nn.Module):
-  # Residual block. Input and output share one width by design, so
-  # the skip connection is the identity.
-  #
-  # Arguments:
-  #   size = feature width, shared by input and output
-  #   n_layers = number of dense layers between two skip points
-  #   norm = normalization factory, invoked as norm(size)
-  #   act = activation factory, invoked as act(size)
-  #
-  # norm and act are factories, not ready-made modules: each is
-  # invoked once per dense layer so every layer holds an independent
-  # module. A shared instance would couple the layers' learnable
-  # normalization parameters.
-  #
-  # Factory examples:
-  #   norm = nn.BatchNorm1d       (accepts size)
-  #   norm = lambda s: Affine()   (Affine accepts no size)
-  #   act = activation_fcn        (accepts size)
-  #   act = lambda s: nn.Tanh()   (Tanh accepts no size)
-  def __init__(self, 
-               size, 
+  """
+  Width-preserving residual block: n_layers dense layers between
+  two skip points, the input added back to the last layer's output
+  before its norm and activation. Input and output share one width
+  by design, so the skip connection is the identity (no projection
+  layer needed):
+
+    x ─┬─ Linear ─ norm ─ act ─ ... ─ Linear ─(+)─ norm ─ act ─> out
+       └─────────────── identity skip ──────────┘
+
+  Arguments:
+    size     = feature width, shared by input and output.
+    n_layers = number of dense layers between two skip points.
+    norm     = normalization factory, invoked as norm(size).
+    act      = activation factory, invoked as act(size).
+
+  norm and act are factories, not ready-made modules: each is
+  invoked once per dense layer so every layer holds an independent
+  module. A shared instance would couple the layers' learnable
+  normalization parameters.
+
+  Factory examples:
+    norm = nn.BatchNorm1d       (accepts size)
+    norm = lambda s: Affine()   (Affine accepts no size)
+    act  = activation_fcn       (accepts size)
+    act  = lambda s: nn.Tanh()  (Tanh accepts no size)
+  """
+  def __init__(self,
+               size,
                n_layers = 2,
                norm = lambda s: Affine(),
                act = activation_fcn):
@@ -103,56 +117,6 @@ class ResBlock(nn.Module):
     return out
 
 
-def conv1d_as_matmul(conv, x):
-  """
-  Run an nn.Conv1d as one matmul -- same parameters, same output,
-  matmul-shaped compute.
-
-  The correction heads' conv shape (moderate channels over a tiny
-  length: 90 -> 90 channels, 26 theta positions) sits outside every
-  fast conv path and benchmarks at ~1% of matmul throughput -- the
-  conv alone was most of a head-phase epoch. A convolution IS a
-  linear map, so express it as one: pad, slide a kernel-wide window
-  along theta, and contract each position's (C_in x K) receptive
-  field against the flattened conv weight in a single
-  (B*L, C_in*K) @ (C_in*K, C_out) matmul. Output identical to
-  conv(x) to float precision; ~25x faster forward at the head shape
-  on CPU (~5x on the whole head-phase training step).
-
-  The parameters still live in the nn.Conv1d passed in -- same
-  state_dict, same checkpoints, same optimizer groups; only the
-  compute path changes.
-
-  Arguments:
-    conv = an nn.Conv1d with stride/dilation/groups = 1 and
-           symmetric same-padding (what the ResCNN heads build).
-    x    = (B, C_in, L) input.
-
-  Returns:
-    (B, C_out, L) tensor, contiguous, equal to conv(x).
-  """
-  K   = conv.kernel_size[0]
-  pad = conv.padding[0]
-  B, C, L = x.shape
-  xp = nn.functional.pad(x, (pad, pad))     # (B, C, L + 2*pad)
-  # unfold along the length axis: a strided VIEW (no copy) of shape
-  # (B, C, L, K) whose [b, c, l] slot is the K-window xp[b, c, l:l+K]
-  # -- position l's receptive field in channel c.
-  xu = xp.unfold(2, K, 1)
-  # gather each position's full (C, K) receptive field into one row:
-  # (B, L, C, K) -> (B*L, C*K). The reshape after the permute is
-  # where the one real copy happens.
-  m = xu.permute(0, 2, 1, 3).reshape(B * L, C * K)
-  # conv.weight is (C_out, C_in, K); flattened to (C_out, C*K) its
-  # rows match m's columns, so one GEMM computes every output
-  # position and channel at once.
-  y = m @ conv.weight.reshape(conv.out_channels, C * K).t()
-  y = y + conv.bias
-  # (B*L, C_out) -> (B, C_out, L); contiguous so downstream .view
-  # calls work.
-  return y.view(B, L, conv.out_channels).permute(0, 2, 1).contiguous()
-
-
 class BinLinear(nn.Module):
   """
   G independent Linear(in_features, out_features) layers -- one per
@@ -161,7 +125,7 @@ class BinLinear(nn.Module):
   into (G, out); token g's rows only ever meet weight[g].
 
   This is the "unique per token" piece of the ResTRF head: a
-  standard transformer applies ONE shared MLP to every token,
+  standard transformer applies one shared MLP to every token,
   whereas here each token gets its own weights. The tokens are
   physically distinct -- a tomographic bin (plain ResTRF) or a
   (template, bin) pair (the factored version) -- and the unique
@@ -169,7 +133,7 @@ class BinLinear(nn.Module):
   job a positional encoding does in a standard transformer, so
   ResTRF needs none.
 
-  These per-token layers live in the correction HEAD, after
+  These per-token layers live in the correction head, after
   attention has shared information across tokens -- the trunk's
   parameter sharing (the expensive cosmology map, learned once) is
   untouched.
@@ -210,48 +174,69 @@ class BinLinear(nn.Module):
 
 class TRFBlock(nn.Module):
   """
-  One transformer block over tokens at their NATURAL width: no
+  One transformer block over tokens at their natural width: no
   embedding in, no projection out -- the tokens are the (padded)
-  physical bin segments themselves, so dim = the bin length. (A
-  learned embedding is what a transformer needs when its sequence
-  is synthetic -- a latent split into tokens; here the sequence
-  structure is physical, so the adapter layers and their
-  parameters are simply not needed.) Self-attention across the G
-  tokens, then a per-token MLP branch -- both pre-norm residual
-  branches, as in a standard pre-LN transformer.
+  physical bin segments themselves, so dim = max_bin, the padded
+  bin length. (A learned embedding is what a transformer needs when
+  its sequence is synthetic -- a flat latent vector split into
+  tokens; here the sequence structure is physical, so the adapter
+  layers and their parameters are simply not needed.)
+  Self-attention across the G tokens, then a per-token MLP branch
+  -- both pre-norm residual branches, as in a standard pre-LN
+  transformer:
+
+    x  (B, G, dim)             G tokens (bins) of width dim
+       │  LayerNorm; wq / wk / wv        (shared across tokens)
+       ▼
+    q, k, v  (B, G, H, d_head)           H heads, d_head = dim/H
+       │  scores = q.k / sqrt(d_head); softmax over the key axis
+       ▼
+    att  (B, H, G, G)          per head: each query bin's weights
+       │                       over all key bins
+       │  att @ v; merge heads; wo       (wo zero-initialized)
+       ▼
+    x + attention branch
+       │  LayerNorm; n_mlp_blocks x [BinLinear + act]
+       │                                 (last layer zero-init)
+       ▼
+    x + MLP branch             the block's output (= x at init)
+
+  (legend: B = batch rows; G = n_tokens, the number of tokens; dim
+  = the per-token width; H = n_heads; d_head = dim/H, the feature
+  slice each head works in.)
 
   Two deliberate deviations from the textbook block:
-  - the TOKENS are physical: a tomographic bin's theta segment
+  - the tokens are physical: a tomographic bin's theta segment
     (plain ResTRF) or a (template, bin) pair's (the factored
     version), so attention shares information across bins (the
     cross-bin correlations a within-bin conv cannot see);
-  - the position-wise MLP is NOT shared (by default): each token
+  - the position-wise MLP is not shared (by default): each token
     has its own n_mlp_blocks-deep stack (BinLinear), where a
     standard transformer applies one shared MLP to every token.
     The unique weights specialize each token's correction and
     stand in for the positional encoding (see BinLinear).
     shared_mlp=True restores the textbook shared MLP -- the
     ablation baseline isolating that deviation. Caveat: with the
-    MLP shared (and the attention maps always shared), NOTHING in
+    MLP shared (and the attention maps always shared), nothing in
     the block tells the tokens apart structurally -- the head
     becomes permutation-equivariant over tokens, with no
     positional encoding; token identity then comes only from the
     segments' content.
 
-  The attention projections (wq / wk / wv / wo) ARE shared across
+  The attention projections (wq / wk / wv / wo) are shared across
   tokens, as in any transformer -- shared maps are what let every
   token attend to every other with one set of weights; the
   per-token specialization lives in the MLPs.
 
-  The block is EXACTLY the identity at init: both branch outputs
+  The block is exactly the identity at init: both branch outputs
   (wo and the last MLP layer) are zero-initialized, so x passes
   through untouched. A stack of these blocks therefore satisfies
   blocks(x) == x at init, which is what lets the ResTRF head
   define its correction as blocks(h) - h == 0 -- the zero-init
   identity start, with no output projection to host it. Gradients
-  still reach the zeroed layers (their grads depend on their
-  INPUTS, not their weights); the layers behind them wake one
-  step later.
+  still reach the zeroed layers (a layer's weight gradient depends
+  on its inputs, not on its own weights); the layers behind them
+  wake one step later.
 
   LayerNorm (not the package's Affine) opens both branches: the
   softmax's saturation depends on the score scale, so attention
@@ -259,20 +244,22 @@ class TRFBlock(nn.Module):
   stable-training default for transformers.
 
   Arguments:
-    dim          = token width = the padded bin length (must divide
-                   by n_heads; a bin length of 26 allows 1 / 2 /
+    dim          = token width = max_bin, the padded bin length
+                   (must be divisible by n_heads; the LSST-Y1
+                   cosmic-shear run keeps max_bin = 26 theta
+                   points per bin, allowing n_heads = 1, 2, or
                    13).
     n_tokens     = number of tokens G.
     n_heads      = attention heads (each head attends over all G
                    tokens with dim/n_heads of the features).
     n_mlp_blocks = depth of each token's private MLP stack.
-    act          = activation factory act(dim) -> module for the MLP
-                   layers (the run's activation; defaults to
+    act          = activation factory act(dim) -> module for the
+                   MLP layers (the run's activation; defaults to
                    activation_fcn, the paper's H).
     shared_mlp   = False (default): per-token unique MLPs
-                   (BinLinear). True: ONE MLP shared by every token
-                   (plain nn.Linear applied position-wise) -- the
-                   textbook block, see the caveat above.
+                   (BinLinear). True: one MLP shared by every
+                   token (plain nn.Linear applied position-wise)
+                   -- the textbook block, see the caveat above.
   """
   def __init__(self, dim, n_tokens, n_heads=2, n_mlp_blocks=2,
                act=activation_fcn, shared_mlp=False):
@@ -306,7 +293,7 @@ class TRFBlock(nn.Module):
     self.mlp_lins = nn.ModuleList(lins)
     self.mlp_acts = nn.ModuleList(acts)
 
-    # identity at init: zero both branch OUTPUTS (see docstring).
+    # identity at init: zero both branch outputs (see docstring).
     # The final MLP activation maps 0 -> 0 (H(x) = gate(x)*x), so a
     # zeroed last layer silences the whole branch.
     nn.init.zeros_(self.wo.weight)
@@ -331,7 +318,7 @@ class TRFBlock(nn.Module):
     # matrix per head. Divided by sqrt(d_head) so the dot products
     # stay O(1) and the softmax does not saturate at init.
     att = torch.einsum("bghd,bkhd->bhgk", q, k) / self.d_head ** 0.5
-    # softmax over the KEY axis: each query bin's weights over all
+    # softmax over the key axis: each query bin's weights over all
     # bins sum to 1.
     att = torch.softmax(att, dim=-1)
     # weighted sum of the value tokens, einsum("bhgk,bkhd->bghd"):

@@ -19,6 +19,7 @@ variance, decorrelating the components (the form the model sees, input and
 target).
 """
 
+import copy
 import time
 
 import numpy as np
@@ -539,7 +540,9 @@ def training_loop_batched(nepochs,
                           thresholds,
                           warmup_epochs=0,
                           silent=False,
-                          use_amp=False):
+                          use_amp=False,
+                          clip=0.0,
+                          rewind=False):
   """
   Train the emulator, with a validation pass per epoch.
 
@@ -578,6 +581,26 @@ def training_loop_batched(nepochs,
                  prints; metrics and returns are unchanged.
     use_amp    = if True, run the forward in bfloat16 autocast;
                  the loss stays in float32/64.
+    clip       = gradient-norm ceiling per optimizer step (0 =
+                 off, the default). Each step, the norm of the
+                 FULL gradient vector (all trainable parameters
+                 together) is measured; if it exceeds clip, every
+                 gradient is rescaled by clip/norm -- same
+                 direction, bounded size. Kills the single-batch
+                 kick a monster-outlier batch produces under a
+                 quadratic loss, regardless of loss mode.
+    rewind     = if True, whenever the plateau scheduler cuts the
+                 lr, reload the best-so-far weights AND the
+                 optimizer state snapshotted with them, then keep
+                 the new (reduced) lr. An excursion into a bad
+                 basin then costs at most `patience` epochs: the
+                 median stalls, the scheduler fires, and the run
+                 resumes from its best point at a lower lr --
+                 instead of decaying the lr inside the wreckage.
+                 Applies only to ReduceLROnPlateau (an epoch
+                 scheduler like CosineAnnealingLR changes the lr
+                 every epoch; rewinding on each change would pin
+                 the run to its best forever).
 
   Returns:
     train_losses, medians, means, fracs = per-epoch lists
@@ -642,6 +665,15 @@ def training_loop_batched(nepochs,
   best_state = {}
   for k, v in model.state_dict().items():
     best_state[k] = v.detach().clone()
+  # rewind needs the optimizer state that BELONGS to the best
+  # weights (Adam's moments track a trajectory; moments from a bad
+  # basin would kick the restored weights right back out). deepcopy:
+  # state_dict() returns live tensor references. At this baseline
+  # the optimizer is fresh, so the snapshot is the empty state --
+  # restoring it simply resets the moments.
+  best_opt_state = None
+  if rewind:
+    best_opt_state = copy.deepcopy(optimizer.state_dict())
   if not silent:
     print(f"epoch   0  baseline (no training yet): "
           f"val {b_mean:.4f}  med {b_median:.4f}"
@@ -728,6 +760,14 @@ def training_loop_batched(nepochs,
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        # gradient-norm clipping (0 = off): rescale the full
+        # gradient vector to norm <= clip before the step, so one
+        # monster-outlier batch cannot kick the weights (direction
+        # kept, size bounded). clip_grad_norm_ skips parameters
+        # whose grad is None -- the frozen trunk in a head phase.
+        if clip > 0.0:
+          nn.utils.clip_grad_norm_(model.parameters(),
+                                   max_norm=clip)
         optimizer.step()
         run_sum += loss.detach() * b.numel()
         run_n   += b.numel()
@@ -767,6 +807,10 @@ def training_loop_batched(nepochs,
       best_state = {}
       for k, v in model.state_dict().items():
         best_state[k] = v.detach().clone()
+      # keep the optimizer moments matching the best weights, for
+      # a possible rewind (see the baseline seed above).
+      if rewind:
+        best_opt_state = copy.deepcopy(optimizer.state_dict())
 
     # the scheduler takes over once the warmup ramp (applied at the
     # top of the epoch) is done -- not stepped during warmup, since
@@ -778,7 +822,35 @@ def training_loop_batched(nepochs,
     if epoch > warmup_epochs:
       if isinstance(scheduler,
                     lr_scheduler.ReduceLROnPlateau):
+        lrs_before = []
+        for grp in optimizer.param_groups:
+          lrs_before.append(grp["lr"])
         scheduler.step(median)
+        # rewind-to-best: a plateau lr cut means `patience` epochs
+        # brought no median improvement -- either a true plateau
+        # (rewind to best is a no-op, best ~= current) or the run
+        # wandered into a bad basin (rewind is the rescue: without
+        # it the scheduler keeps decaying the lr INSIDE the
+        # wreckage and freezes the run there). Restore the best
+        # weights and their optimizer snapshot, then reapply the
+        # NEW (reduced) lrs -- load_state_dict would otherwise
+        # bring back the snapshot's old lr.
+        cut = False
+        for grp, lr_old in zip(optimizer.param_groups, lrs_before):
+          if grp["lr"] < lr_old:
+            cut = True
+        if rewind and cut:
+          lrs_new = []
+          for grp in optimizer.param_groups:
+            lrs_new.append(grp["lr"])
+          model.load_state_dict(best_state)
+          optimizer.load_state_dict(best_opt_state)
+          for grp, lr_new in zip(optimizer.param_groups, lrs_new):
+            grp["lr"] = lr_new
+          if not silent:
+            print(f"           lr cut -> rewound to best epoch "
+                  f"{best_epoch} (frac>0.2 {best_frac:.4f}), "
+                  f"resuming at lr {lrs_new[0]:.2e}")
       else:
         scheduler.step()
 
@@ -827,6 +899,7 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                  sched_opts=None, trim_opts=None, focus_opts=None,
                  thresholds=None, gpu_mem_gb=16, use_amp=False,
                  silent=False, device='gpu', seed=0,
+                 clip=0.0, rewind=False,
                  trunk_epochs=0, trunk_opts=None, head_opts=None):
   """
   One training run; model, optimizer, schedule auto-built.
@@ -835,6 +908,25 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
   loaders, then trains. Three spec dicts (model_opts, opt_opts,
   lr_opts) group the related knobs, as block_opts groups a
   ResBlock's.
+
+  The two-phase schedule (trunk_epochs > 0, factored head models):
+
+    phase "trunk"  (epochs 1 .. trunk_epochs)
+       │  head bypassed: trains as the pure trunk, at trunk cost
+       │  (own optimizer / lr warmup / scheduler / trim / focus)
+       ▼
+    best trunk weights restored  (best frac>0.2 epoch, never the
+       │                          last one)
+       │  set_train_phase("head"): trunk frozen, run under no_grad
+       ▼
+    phase "head"   (the remaining nepochs - trunk_epochs epochs)
+       │  head + gates only, from the zero-init identity start, so
+       │  the loss is continuous at the handoff (fresh optimizer /
+       │  warmup / scheduler; the trunk: / head: blocks override
+       │  lr_base / loss_mode / trim / focus / clip / rewind per
+       │  phase)
+       ▼
+    model restored to the head pass's best frac>0.2 epoch
 
   Arguments:
     train_set    = training source dict: "C" full param dump,
@@ -879,6 +971,14 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     use_amp      = run the forward in low-precision autocast.
     silent       = suppress all printing if True.
     seed         = manual seed for init + per-epoch shuffles.
+    clip         = gradient-norm ceiling per step (0 = off); see
+                   training_loop_batched. A guard against
+                   single-batch gradient kicks from monster
+                   outliers under a quadratic loss.
+    rewind       = reload the best weights + optimizer snapshot
+                   whenever the plateau scheduler cuts the lr; see
+                   training_loop_batched. Bounds any excursion
+                   into a bad basin to `patience` epochs.
     trunk_epochs = if > 0, two-phase training (the model must
                    define set_train_phase, e.g. TemplateResCNN):
                    the first trunk_epochs epochs train the trunk
@@ -907,7 +1007,11 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                        count from the pass's own epoch 1);
                      "focus"     -> the pass's focus schedule,
                        ditto (include kappa -- no merge with the
-                       main block).
+                       main block);
+                     "clip"      -> the pass's gradient-norm
+                       ceiling (0 = off);
+                     "rewind"    -> the pass's rewind-on-lr-cut
+                       switch (true / false).
 
   Returns:
     model        = trained network, restored to the best frac>0.2
@@ -1078,23 +1182,31 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
       phase_opts = trunk_opts
     elif phase == "head":
       phase_opts = head_opts
-    lr_pass    = learning_rate
-    mode_pass  = loss_mode
-    trim_pass  = trim_opts
-    focus_pass = focus_opts
+    lr_pass     = learning_rate
+    mode_pass   = loss_mode
+    trim_pass   = trim_opts
+    focus_pass  = focus_opts
+    clip_pass   = clip
+    rewind_pass = rewind
     if phase_opts:
       if "lr_base" in phase_opts:
         lr_pass = (phase_opts["lr_base"]
                    * (bs / lr_opts["bs_base"]) ** 0.5)
-      mode_pass  = phase_opts.get("loss_mode", loss_mode)
-      trim_pass  = phase_opts.get("trim", trim_opts)
-      focus_pass = phase_opts.get("focus", focus_opts)
+      mode_pass   = phase_opts.get("loss_mode", loss_mode)
+      trim_pass   = phase_opts.get("trim", trim_opts)
+      focus_pass  = phase_opts.get("focus", focus_opts)
+      clip_pass   = phase_opts.get("clip", clip)
+      rewind_pass = phase_opts.get("rewind", rewind)
     if phase is not None and not silent:
       noted = []
       if trim_pass is not trim_opts:
         noted.append("trim")
       if focus_pass is not focus_opts:
         noted.append("focus")
+      if clip_pass != clip:
+        noted.append(f"clip {clip_pass:g}")
+      if rewind_pass != rewind:
+        noted.append(f"rewind {rewind_pass}")
       tail = (f"  [{phase} overrides: {', '.join(noted)}]"
               if noted else "")
       print(f"phase '{phase}': {n_pass} epochs, lr restarts "
@@ -1121,7 +1233,9 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                                  trim_opts=trim_pass,
                                  focus_opts=focus_pass,
                                  use_amp=use_amp,
-                                 silent=silent)
+                                 silent=silent,
+                                 clip=clip_pass,
+                                 rewind=rewind_pass)
     # histories concatenate across phases: one continuous per-epoch
     # record, as a single-pass run produces.
     train_losses += tl

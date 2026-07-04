@@ -13,6 +13,22 @@ PS: to whiten is to rotate into the covariance eigenbasis and scale each
 direction to unit variance, so correlated quantities become decorrelated
 and equally scaled. encode = center the raw input, then whiten it; decode
 is its exact inverse.
+
+    theta (B, n_param)       raw cosmological parameters
+       │  - center           subtract the parameter means
+       ▼
+       │  rotate             into the parameter-covmat eigenbasis
+       ▼
+       │  unit-scale         divide by each direction's spread
+       ▼
+    x  (B, encoded_dim)      whitened model inputs
+
+(legend: B = batch rows; n_param = number of sampled parameters;
+encoded_dim = the model-input width -- equal to n_param for the plain
+geometries, larger for the factored ones, which whiten everything
+except the IA amplitude(s) and append those raw at the end for the
+loss's closed-form combine. decode runs the arrows bottom-up, exactly
+inverting each step.)
 """
 
 import numpy as np

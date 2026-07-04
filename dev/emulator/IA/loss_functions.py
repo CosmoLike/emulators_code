@@ -194,6 +194,26 @@ class TemplateFactoredChi2(CosmolikeChi2):
   (constant-coefficient) template. Amplitudes are physical (all
   zero = the no-IA limit); coeff_fn defines the template order.
 
+    pred (B, T, n_keep)          whitened templates (the model)
+       │
+       │    A (B, n_amps)        raw amplitudes, sliced off the
+       │       │                 END of the encoded params
+       │       │  coeff_fn       the closed-form polynomial
+       │       ▼
+       │    c (B, T)             per-template coefficients
+       │  ─────┘
+       │  combine: xi = sum_t c_t * template_t   (einsum over t)
+       ▼
+    xi (B, n_keep)               whitened combined prediction
+       │  CosmolikeChi2.chi2 / .loss against the whitened target
+       ▼
+    per-sample chi2 (B,)  /  scalar training loss
+
+  (legend: B = batch rows; T = n_templates (3 nla / 10 tatt);
+  n_keep = kept dv length, one template's width; n_amps = appended
+  amplitude columns (1 nla / 3 tatt); coeff_fn = nla_coeffs /
+  tatt_coeffs above.)
+
   needs_params = True (the loss needs the amplitudes).
   """
   needs_params = True

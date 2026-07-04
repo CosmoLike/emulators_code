@@ -15,6 +15,23 @@ unit variance (decorrelated, equally-hard-to-fit components). To squeeze
 is to keep only the unmasked entries of the full data vector (the masked
 ones the analysis drops). encode = squeeze, center, then whiten, the form
 the network predicts.
+
+    dv (B, total_size)       raw cosmolike data vector
+       │  squeeze            keep the unmasked entries (dest_idx)
+       ▼
+       │  - center           subtract the training-mean dv
+       ▼
+       │  whiten             rotate into the covariance eigenbasis,
+       │                     scale each direction to unit variance
+       ▼
+    t  (B, n_keep)           whitened target the network predicts
+
+(legend: B = batch rows; total_size = full data-vector length
+including masked entries; n_keep = the kept/unmasked length, the
+width the network emits; dest_idx = the kept entries' positions in
+the full vector. unwhiten / unsqueeze / decode invert the arrows
+bottom-up; the chi2 (loss_functions.py) un-whitens the residual and
+contracts it with the inverse covariance.)
 """
 
 import os

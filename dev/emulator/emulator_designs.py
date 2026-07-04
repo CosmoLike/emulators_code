@@ -1,19 +1,36 @@
 """Standard emulator models (ResMLP, ResCNN, ResTRF).
 
-Full networks mapping whitened parameters to the whitened data vector.
-ResMLP is the baseline: input projection, a stack of identical ResBlocks,
-output projection, final Affine. ResCNN and ResTRF add a correction
-appendix on a ResMLP trunk: the trunk predicts in the full
-(cov-eigenbasis) whitening, fixed buffers map its output into theta order,
-a structured head corrects it there -- a 1D conv along the angular axis
-(ResCNN), or a transformer whose tokens are the tomographic bins
-(ResTRF) -- and a learnable gate adds the correction back, so swapping
-the architecture changes only the model. Per-bin conv variants live in
-parallel/.
+Full networks mapping whitened cosmological parameters to the whitened
+data vector. Where this file sits in the training pipeline:
+
+  cosmological parameters
+     │   geometries_parameter.py  center, rotate, unit-scale (whiten in)
+     ▼
+  whitened inputs
+     │   emulator_designs.py      ResMLP, ResCNN, or ResTRF (this file)
+     ▼
+  whitened data vector
+     │   geometries_output.py     un-whiten + scatter to full length
+     ▼
+  physical residual vs truth
+     │   loss_functions.py        contract with the inverse covariance
+     ▼
+  chi2 = r^T Cinv r
+
+ResMLP is the baseline: input projection, a stack of identical
+ResBlocks, output projection, final Affine. ResCNN and ResTRF add a
+correction appendix on a ResMLP trunk: the trunk predicts in the full
+(cov-eigenbasis) whitening, fixed buffers map its output into theta
+order, a structured head corrects it there -- a 1D conv along the
+angular axis (ResCNN), or a transformer whose tokens are the
+tomographic bins (ResTRF) -- and a learnable gate adds the correction
+back, so swapping the architecture changes only the model. Per-bin
+conv variants live in parallel/.
 
 Whitened = rotated into the covariance eigenbasis and scaled to unit
 variance, leaving the components decorrelated and equally hard to fit;
-done by the geometry classes (geometries_parameter / geometries_output).
+done by the geometry classes (geometries_parameter /
+geometries_output).
 """
 
 import torch
@@ -21,13 +38,22 @@ import torch.nn as nn
 
 from .activations import activation_fcn
 from .emulator_designs_building_blocks import (
-  Affine, ResBlock, TRFBlock, conv1d_as_matmul)
+  Affine, ResBlock, TRFBlock)
 
 
 class ResMLP(nn.Module):
   """
-  Full emulator: input projection, a stack of identical residual
-  blocks, output projection, final learnable affine.
+  The baseline emulator: input projection, a stack of identical
+  residual blocks, output projection, final learnable affine.
+
+    x  (B, input_dim)     whitened cosmological parameters
+       │  Linear: input_dim -> int_dim_res
+       ▼
+       │  n_blocks x ResBlock, all at width int_dim_res
+       ▼
+       │  Linear: int_dim_res -> output_dim;  Affine
+       ▼
+    dv (B, output_dim)    whitened data vector
 
   Arguments:
     input_dim   = number of cosmological parameters
@@ -42,14 +68,14 @@ class ResMLP(nn.Module):
   leak between them. All blocks share one configuration, capping
   the hyperparameter count.
   """
-  def __init__(self, 
-               input_dim, 
-               output_dim, 
+  def __init__(self,
+               input_dim,
+               output_dim,
                int_dim_res,
-               n_blocks=3, 
+               n_blocks=3,
                block_opts=None):
     super().__init__()
-    
+
     # Default to {} (not in the signature: a mutable default is
     # created once and would leak between calls).
     if block_opts is None:
@@ -83,16 +109,42 @@ class ResCNN(nn.Module):
   trunk is identical to the standalone ResMLP and predicts in the
   full (cov-eigenbasis) whitened basis, so its loss stays the
   well-conditioned chi2 = ||pred - target||^2 (identity Hessian).
+  The forward pass, shapes and all:
+
+    x  (B, input_dim)           whitened parameters
+       │  self.mlp              the ResMLP trunk
+       ▼
+    y  (B, n_keep)              full-whitened dv (also the skip)
+       │  @ W_fd                f -> d: theta order, /sigma
+       ▼
+    h  (B, n_keep)
+       │  pad_idx scatter       pad slots stay zero
+       ▼
+    c  (B, n_bins, max_bin)     tomographic bins = conv channels
+       │  n_blocks_cnn x [Conv1d + act]
+       ▼
+       │  pad_idx gather        drop the pad slots
+       ▼
+    corr (B, n_keep)
+       │  @ W_df                d -> f, back to full whitening
+       ▼
+    out = y + gate * corr       corr = 0 at init (identity start)
+
+  (legend: B = batch rows; n_keep = kept data-vector length, the
+  unmasked entries the model emulates = output_dim; n_bins = number
+  of tomographic (xi+/-, source-pair) bins; max_bin = the longest
+  bin's kept theta count = the padded bin width; f / d = the
+  full-whitened / diagonal-theta bases, see the W_fd buffers below.)
 
   The CNN is an additive correction in the diagonal view (theta
   order, per-element /sigma; the full-whitened basis scrambles the
   angular order, so a conv there has no locality). The theta-order
   dv splits into its (xi+/-, source-pair) tomographic bins, and the
-  bins become the conv's CHANNELS: one Conv1d(n_bins -> n_bins,
+  bins become the conv's channels: one Conv1d(n_bins -> n_bins,
   kernel_size) slides a single kernel along theta over the whole
   data vector at once. At every theta position each output bin
-  reads a kernel_size-wide window of ALL bins -- theta-local AND
-  cross-bin (the bins share one angular grid, so channel mixing
+  reads a kernel_size-wide window of all the bins -- theta-local
+  and cross-bin (the bins share one angular grid, so channel mixing
   couples different bins at like angular scales, up to per-bin mask
   offsets). No channel expansion: the head's tensors never grow
   beyond the (padded) dv size, so the bandwidth wall the old
@@ -102,16 +154,17 @@ class ResCNN(nn.Module):
   kernel); the only head hyperparameters are kernel_size and
   n_blocks_cnn.
 
-  Bins differ in kept length, so each is padded to max_bin inside a
-  fixed index buffer (pad_idx scatters the n_keep theta-order
-  entries into the padded (n_bins, max_bin) layout and gathers the
-  corrections back; pad slots stay zero). The bin split comes from
-  geom.bin_sizes (attached by build_shear_angle_map; the needs_bins
-  flag makes EmulatorExperiment run it).
+  Bins differ in kept length, so each is padded to max_bin (the
+  longest bin's kept theta count) inside a fixed index buffer
+  (pad_idx scatters the n_keep theta-order entries into the padded
+  (n_bins, max_bin) layout and gathers the corrections back; pad
+  slots stay zero). The bin split comes from geom.bin_sizes
+  (attached by build_shear_angle_map; the needs_bins flag makes
+  EmulatorExperiment run it).
 
   The head starts as an exact identity: the last conv is
-  zero-initialized, so corr = 0 and the model IS its trunk at epoch
-  1 (the zero-init-residual-branch start; gradients reach the
+  zero-initialized, so corr = 0 and the model equals its trunk at
+  epoch 1 (the zero-init-residual-branch start; gradients reach the
   zeroed conv through the nonzero gate at step 1).
 
   The two basis-change maps are precomputed and stored as fixed
@@ -207,7 +260,7 @@ class ResCNN(nn.Module):
     self.convs = nn.ModuleList(convs)
     self.acts  = nn.ModuleList(acts)
 
-    # zero-init the LAST conv: corr = 0 at init (the activation maps
+    # zero-init the last conv: corr = 0 at init (the activation maps
     # 0 -> 0), so the model starts as its trunk exactly; the zeroed
     # conv gets real gradients through the nonzero gate at step 1,
     # earlier blocks wake one step later.
@@ -235,6 +288,9 @@ class ResCNN(nn.Module):
   def forward(self, x):
     # trunk prediction in the full-whitened basis (the bulk map).
     y = self.mlp(x)                   # (B, n_keep)
+    # (reminder: W_fd = f -> d, full-whitened -> diagonal theta
+    # order; W_df = d -> f, its inverse. The subscripts read in
+    # multiply order: x @ W_fd starts in f and lands in d.)
     h = y @ self.W_fd                 # f -> d, theta order
     # scatter into the padded per-bin layout: each bin one channel.
     padded = h.new_zeros(h.shape[0], self.n_bins * self.max_bin)
@@ -242,11 +298,10 @@ class ResCNN(nn.Module):
     c = padded.view(-1, self.n_bins, self.max_bin)
     n = len(self.convs)
     for i in range(n):
-      # cross-bin, theta-local; the conv runs as a matmul (identical
-      # map, ~25x faster at this conv shape -- see conv1d_as_matmul).
-      c = self.acts[i](conv1d_as_matmul(self.convs[i], c))
+      c = self.acts[i](self.convs[i](c))   # cross-bin, theta-local
     # gather the real entries back out of the padding, return to the
-    # full-whitened basis, add through the gate.
+    # full-whitened basis (reminder: @ W_df goes d -> f), add
+    # through the gate.
     corr = c.reshape(-1, self.n_bins * self.max_bin)[:, self.pad_idx]
     return y + self.gate * (corr @ self.W_df)
 
@@ -258,23 +313,48 @@ class ResTRF(nn.Module):
   (cov-eigenbasis) whitening; the head maps its output into theta
   order (ResCNN's fixed W_fd / W_df buffers), splits it into the
   (xi+/-, source-pair) tomographic bins, and runs a transformer
-  whose TOKENS are those bins: attention shares information across
-  bins, then each bin's own MLP stack specializes its correction
-  (see TRFBlock for the two deviations from a textbook block). A
-  per-bin conv (parallel/) refines within bins but never across
-  them; attention is the head for CROSS-bin structure in the
-  trunk's residuals.
+  whose tokens are those bins. The forward pass, shapes and all:
+
+    x  (B, input_dim)           whitened parameters
+       │  self.mlp              the ResMLP trunk
+       ▼
+    y  (B, n_keep)              full-whitened dv (also the skip)
+       │  @ W_fd                f -> d: theta order, /sigma
+       ▼
+       │  pad_idx scatter       pad slots stay zero
+       ▼
+    t0 (B, n_bins, max_bin)     one token per bin, width max_bin
+       │  n_blocks_trf x TRFBlock
+       │                        cross-bin attention + per-bin MLPs
+       ▼
+    t  (B, n_bins, max_bin)
+       │  corr = t - t0         what the blocks added (0 at init)
+       │  pad_idx gather, @ W_df    d -> f, back to full whitening
+       ▼
+    out = y + gate * corr
+
+  (legend: B = batch rows; n_keep = kept data-vector length, the
+  unmasked entries the model emulates = output_dim; n_bins = number
+  of tomographic (xi+/-, source-pair) bins; max_bin = the longest
+  bin's kept theta count = the padded token width; f / d = the
+  full-whitened / diagonal-theta bases, see the W_fd buffers below.)
+
+  Attention shares information across bins, then each bin's own MLP
+  stack specializes its correction (see TRFBlock for the two
+  deviations from a textbook block). A per-bin conv (parallel/)
+  refines within bins but never across them; attention is the head
+  for cross-bin structure in the trunk's residuals.
 
   The bin split comes from geom.bin_sizes (attached by
   build_shear_angle_map; EmulatorExperiment runs it when the
   needs_bins flag is set). Bins differ in length, so each is padded
-  to max_bin inside a fixed index buffer (pad_idx scatters the
-  n_keep theta-order entries into the padded (G, max_bin) layout
-  and gathers the corrections back; the pad positions stay zero and
-  drop at the gather).
+  to max_bin (the longest bin's kept theta count) inside a fixed
+  index buffer (pad_idx scatters the n_keep theta-order entries
+  into the padded (G, max_bin) layout and gathers the corrections
+  back; the pad positions stay zero and drop at the gather).
 
-  The tokens live at their NATURAL width: max_bin, the padded bin
-  length. There is deliberately NO embedding layer in and NO output
+  The tokens live at their natural width: max_bin, the padded bin
+  length. There is deliberately no embedding layer in and no output
   projection out -- those adapters are what a transformer needs
   when its sequence is synthetic (a flat latent split into tokens,
   as in the published CMB design, where they were the parameter-
@@ -282,10 +362,10 @@ class ResTRF(nn.Module):
   raw bin segments are the tokens and the blocks' output is already
   in dv layout. The correction is corr = blocks(h) - h: every
   TRFBlock is exactly the identity at init (its branch outputs are
-  zero-initialized, see TRFBlock), so corr = 0 and the model IS its
-  trunk at epoch 1 -- the same zero-init identity start as the conv
-  heads, with the same wake-up chain (the zeroed branch layers get
-  real gradients through the nonzero gate at step 1).
+  zero-initialized, see TRFBlock), so corr = 0 and the model equals
+  its trunk at epoch 1 -- the same zero-init identity start as the
+  conv heads, with the same wake-up chain (the zeroed branch layers
+  get real gradients through the nonzero gate at step 1).
 
   needs_geom / needs_bins are capability flags EmulatorExperiment
   reads: geom injected (basis buffers + bin sizes), compile_mode
@@ -300,8 +380,9 @@ class ResTRF(nn.Module):
                    bin_sizes; its evecs / sqrt_ev define the basis
                    buffers.
     n_heads      = attention heads per TRFBlock; must divide the
-                   token width max_bin (a bin length of 26 allows
-                   1 / 2 / 13; default 2).
+                   token width max_bin (the LSST-Y1 cosmic-shear
+                   run keeps max_bin = 26 theta points per bin,
+                   allowing n_heads = 1, 2, or 13; default 2).
     n_blocks     = residual blocks in the trunk.
     n_blocks_trf = stacked transformer blocks.
     n_mlp_blocks = depth of each bin's private MLP stack inside
@@ -375,8 +456,9 @@ class ResTRF(nn.Module):
     # learnable scalar gate on the correction (small init, not 0).
     self.gate = nn.Parameter(torch.tensor(float(gate_init)))
 
-    # Frozen basis-change buffers, exactly ResCNN's: x @ W_fd maps
-    # full-whitened -> theta order (/sigma), x @ W_df maps back.
+    # Frozen basis-change buffers, exactly ResCNN's (reminder:
+    # W_fd = f -> d, full-whitened -> diagonal theta order /sigma;
+    # W_df = d -> f, its inverse -- subscripts in multiply order).
     evecs   = geom.evecs.detach()
     sqrt_ev = geom.sqrt_ev.detach()
     sigma   = torch.sqrt(((evecs * sqrt_ev) ** 2).sum(1))
@@ -388,6 +470,9 @@ class ResTRF(nn.Module):
   def forward(self, x):
     # trunk prediction in the full-whitened basis (the bulk map).
     y = self.mlp(x)                   # (B, n_keep)
+    # (reminder: W_fd = f -> d, full-whitened -> diagonal theta
+    # order; W_df = d -> f, its inverse. The subscripts read in
+    # multiply order: x @ W_fd starts in f and lands in d.)
     h = y @ self.W_fd                 # f -> d, theta order
     # scatter into the padded per-bin layout: new_zeros makes the
     # (B, n_bins*max_bin) canvas (pad slots stay 0), the pad_idx
@@ -400,12 +485,12 @@ class ResTRF(nn.Module):
     t = t0
     for blk in self.trf:
       t = blk(t)                      # cross-bin attention + MLPs
-    # the correction is what the blocks ADDED: every block is the
+    # the correction is what the blocks added: every block is the
     # identity at init, so t - t0 = 0 exactly at epoch 1 (the
     # identity start, with no output projection needed to host it).
     # Gather the real entries back out of the padded layout
     # (dropping the pad slots), then return to the full-whitened
-    # basis and add through the gate.
+    # basis (reminder: @ W_df goes d -> f) and add through the gate.
     corr = (t - t0).reshape(
       -1, self.n_bins * self.max_bin)[:, self.pad_idx]
     return y + self.gate * (corr @ self.W_df)

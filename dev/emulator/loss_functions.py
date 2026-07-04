@@ -90,6 +90,27 @@ class CosmolikeChi2:
   averaging, so a few contaminated data vectors cannot dominate
   the gradient; any per-sample transform (e.g. sqrt) is applied
   after the trim.
+
+    pred, target  (B, out_dim)   both in the whitened eigenbasis
+       │  r = unwhiten(pred - target)     whitened -> physical
+       ▼
+    r  (B, out_dim)              physical residual, kept entries
+       │  einsum r^T Cinv_sq r   (full=True: unsqueeze r to the
+       │                         full dv, contract the full Cinv
+       │                         -- the slow reference path)
+       ▼
+    c  (B,)                      per-sample chi2
+       │  loss() only: drop the worst `trim` fraction (topk) ->
+       │  mode transform (chi2 | sqrt | sqrt_dchi2) -> focal
+       │  weights -> normalized weighted mean
+       ▼
+    scalar training loss
+
+  (legend: B = batch rows; out_dim = kept dv length, the unmasked
+  entries the model emulates; Cinv_sq = the kept x kept sub-block
+  of the inverse covariance, Cinv the full one; unwhiten = the
+  geometry's eigenbasis -> physical map, applicable to the residual
+  directly because whitening is linear.)
   """
 
   def __init__(self, geom):

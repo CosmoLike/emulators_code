@@ -243,19 +243,27 @@ started; new "epoch 0 baseline" stdout line).
 RESUME STATE: (1) rerun two-phase rescnn+nla with the fixed loop;
 head block advice = gate_init 0.1, chi2 + small annealed trim (start
 0.05 -> 0) until the trunk is mature; expect phase-2 epoch 1 ~=
-phase-1 best now. (1b) 07-04k: conv now runs as a matmul
-(conv1d_as_matmul; head epochs were conv-kernel-bound at ~1% matmul
-efficiency) -- ANOTHER reason to re-sync before the next run; expect
-head epochs ~1.2-1.5s from 2.9s. (2) restrf first runs (bin tokens;
-expect near-nla
+phase-1 best now. (1b) 07-04m: conv-as-matmul REVERTED (no GPU gain
+-- CPU-only pathology; native Conv1d restored) and clip/rewind
+stability guards added (YAML: clip / rewind, top-level or per-phase;
+next chi2-head run wants head {trim end 0.01, clip 1.0} + rewind
+true) -- re-sync before the next run. (2) restrf first runs (bin
+tokens; expect near-nla
 epoch cost). (3) POSITIONAL-ENCODING discussion pending (see TO
 DISCUSS in [[nla-as-design-spec]]). (4) production YAML gotchas: trf
 block must NOT have width (deleted knob) and n_heads must divide 26
 (use 2). (5) cocoa deploy: re-sync the WHOLE dev tree (models,
 building blocks, experiment, training, geometries_parameter,
 IA/loss_functions, parallel/ (activations.py DELETED), all 4 drivers,
-both example_yamls, README). Scoreboard unchanged: resmlp 0.1558,
-nla 0.1472, goal 0.10.
+both example_yamls, README). SCOREBOARD (07-04l): rescnn+nla two-phase
+0.1105 (NEW BEST; head epoch 92 of the 1500+1500 T=256 run), nla
+trunk-only 0.1472, resmlp 0.1558, goal 0.10. That run's phase 2
+collapsed to frac ~0.305 after head epoch ~272 (untrimmed-chi2
+objective fit the monster tail at the bulk's expense -- full
+post-mortem in [[nla-as-design-spec]] 04l); best-restore saved the
+deliverable. Next-run config fix: head trim end: 0.01 (floor, never
+0.0). Diagnostics: remaining misses live in SPARSE train regions ->
+N_train sweep is the path below 0.10.
 
 ## Session 2026-07-03 (T=256 production day; the big feature batch)
 
