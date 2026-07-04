@@ -375,7 +375,7 @@ class AmplitudeFactorGeometry:
   [:, -n_amps:].
   """
   def __init__(self, device, pg_keep, amp_idx, n_param,
-               carry_idx=None):
+               carry_idx=None, names=None):
     """Store the split fields (the classmethod builds them).
 
     Arguments:
@@ -391,9 +391,13 @@ class AmplitudeFactorGeometry:
                   the network must still see). None = every
                   amplitude is factored out of the input.
       n_param   = total number of raw parameters.
+      names     = full raw-order parameter names (the covmat
+                  header); the diagnostics read them off the
+                  geometry, like ParamGeometry.names.
     """
     self.pg_keep = pg_keep
     self.n_param = n_param
+    self.names   = list(names) if names is not None else None
     # normalize to plain ints first: amp_idx arrives as a list from
     # the classmethods but as a saved tensor from from_state, and set
     # membership on tensor elements is identity-based (hash, not
@@ -488,7 +492,7 @@ class AmplitudeFactorGeometry:
                             cen, V, np.sqrt(lam))
 
     return cls(device=device, pg_keep=pg_keep, amp_idx=amp_idx,
-               n_param=len(names), carry_idx=carry_idx)
+               n_param=len(names), carry_idx=carry_idx, names=names)
 
   @classmethod
   def from_state(cls, device, state):
@@ -502,7 +506,8 @@ class AmplitudeFactorGeometry:
                                                 state["pg_keep"]),
                amp_idx=state["amp_idx"],
                n_param=state["n_param"],
-               carry_idx=state.get("carry_idx"))
+               carry_idx=state.get("carry_idx"),
+               names=state.get("names"))
 
   def state(self):
     """Tensors to save; keys match __init__ (pg_keep nests the
@@ -510,7 +515,8 @@ class AmplitudeFactorGeometry:
     return {"pg_keep": self.pg_keep.state(),
             "amp_idx": self.amp_idx.cpu(),
             "carry_idx": self.carry_idx.cpu(),
-            "n_param": self.n_param}
+            "n_param": self.n_param,
+            "names": self.names}
 
   def encode(self, theta):
     """Raw parameters -> model input with amplitudes carried.
