@@ -155,6 +155,10 @@ flow, loop integration incl. needs_params). Full battery green.
 NOTE fused AdamW was ALREADY auto-injected on CUDA in
 make_optimizer (my tier-1 suggestion was pre-built); YAML fused:
 false is silently overridden (setdefault would fix if ever wanted).
+PRODUCTION VERIFIED (07-04, MCMC still running on amypond): trunk
+epochs 2.2-2.4s contended -> 1.5s ("good - it did reduce"); epoch 1
+= 22.8s one-time compile (loss now inside the trace). Quiet-machine
+number still to be observed (~0.4-0.55s expected).
 
 **HEAD FOCUS ENABLED (2026-07-04s; user: "why CNN has no focus? by
 the handoff there are very few outliers -- focus could help where
