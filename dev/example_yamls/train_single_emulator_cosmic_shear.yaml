@@ -33,6 +33,16 @@ train_args:
   loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
   silent:    false       # false -> per-epoch progress lines
 
+  # Two-phase schedule (rescnn_nla only; omit or 0 = joint training).
+  # Phase 1 (epochs 1..trunk_epochs): the conv head is bypassed, so the
+  # model trains as pure nla at nla cost per epoch. Phase 2 (the
+  # remaining nepochs - trunk_epochs): the trunk freezes at phase 1's
+  # BEST epoch and runs under no_grad (no trunk backward); only the
+  # head + gates train, from a zero-init identity start, so the loss is
+  # continuous at the handoff. Fresh optimizer / lr warmup / scheduler /
+  # trim / focus schedules per phase.
+  # trunk_epochs: 1500
+
   model:
     # `name` picks the network; the other keys are its kwargs.
     #
@@ -75,18 +85,31 @@ train_args:
     # activation: H
     # n_gates:    3          # gates K for multigate / gated_power
     #
-    # Conv-head knobs (rescnn / rescnn_nla; ignored by the others):
+    # Conv-head knobs (rescnn / rescnn_nla; ignored by the others).
+    # The head is memory-bandwidth-bound, not FLOP-bound: its s/epoch
+    # cost scales like (3 if fold, 1 if mix) * channels * n_blocks_cnn
+    # (the size of the (rows, channels, n_keep) intermediates the GPU
+    # must move each step), so budget those three together.
     # kernel_size:  11       # conv kernel width (odd)
     # channels:     16       # conv filters in the 1D-CNN appendix
     # n_blocks_cnn: 1        # stacked CNN correction blocks
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
+    # template_mix: false    # rescnn_nla only. false (default) = one conv
+    #                        # kernel shared identically across the 3
+    #                        # templates (folded into the batch: 3x the
+    #                        # memory traffic). true = the templates are
+    #                        # the conv's input channels (Conv1d 3->C->3):
+    #                        # same FLOPs, 1/3 the traffic, cross-template
+    #                        # features -- drops the shared-kernel
+    #                        # constraint. A1 exactness unaffected either
+    #                        # way (it lives in the loss combine).
     # compile_mode: default  # conv models default to this already because
     #                        # CUDA-graph capture (reduce-overhead) crashed
     #                        # on the gated skip-add (torch <= 2.x, 2026-06).
     #                        # reduce-overhead is worth ONE retry on a newer
     #                        # torch: graphs remove the per-kernel launch
-    #                        # overhead that dominates s/epoch here (it
-    #                        # either works or crashes in epoch 1).
+    #                        # overhead (it either works or crashes in
+    #                        # epoch 1).
     #
     # nla / rescnn_nla need no other kwargs: n_amps and the 3 templates
     # plus the amplitude column names are set automatically
@@ -99,6 +122,11 @@ train_args:
     lr_base:       0.0025
     bs_base:       64.0
     warmup_epochs: 10
+    # head_lr_base: 0.001  # optional, two-phase runs only: the head
+    #                      # pass's base lr (same sqrt rule). Either way
+    #                      # phase 2 RESTARTS at its base with a fresh
+    #                      # warmup + scheduler -- it never inherits
+    #                      # phase 1's decayed lr.
 
   scheduler:             # cls is fixed to ReduceLROnPlateau
     mode:     min

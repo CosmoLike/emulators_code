@@ -798,7 +798,8 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                  model_opts=None, opt_opts=None, lr_opts=None,
                  sched_opts=None, trim_opts=None, focus_opts=None,
                  thresholds=None, gpu_mem_gb=16, use_amp=False,
-                 silent=False, device='gpu', seed=0):
+                 silent=False, device='gpu', seed=0,
+                 trunk_epochs=0):
   """
   One training run; model, optimizer, schedule auto-built.
 
@@ -827,6 +828,12 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                      "lr_base"/"bs_base" -> sqrt-batch rule
                        (lr = lr_base * sqrt(bs / bs_base))
                      "warmup_epochs"     -> linear lr warmup
+                     "head_lr_base"      -> optional: the two-phase
+                       head pass's base lr (same sqrt rule);
+                       absent -> lr_base. Either way each phase
+                       RESTARTS at its base with a fresh warmup +
+                       scheduler, never at the other phase's
+                       decayed lr.
                    None -> a sensible default.
     sched_opts   = scheduler spec dict (see make_scheduler):
                    "cls" + its kwargs (mode, patience, factor,
@@ -847,6 +854,17 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     use_amp      = run the forward in low-precision autocast.
     silent       = suppress all printing if True.
     seed         = manual seed for init + per-epoch shuffles.
+    trunk_epochs = if > 0, two-phase training (the model must
+                   define set_train_phase, e.g. TemplateResCNN):
+                   the first trunk_epochs epochs train the trunk
+                   alone with the head bypassed (pure-trunk cost),
+                   then the loop restores that phase's best
+                   weights, freezes the trunk, and trains the head
+                   only for the remaining nepochs - trunk_epochs
+                   epochs (fresh optimizer, scheduler, and warmup;
+                   the zero-init head starts as an exact identity,
+                   so the handoff is loss-continuous). 0 (default)
+                   = ordinary joint training.
 
   Returns:
     model        = trained network, restored to the best frac>0.2
@@ -856,6 +874,13 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     means        = per-epoch val mean chi2 (list).
     fracs        = per-epoch list of frac-over-threshold tensors.
   """
+  # a bad two-phase config should fail before any setup work.
+  trunk_epochs = int(trunk_epochs)
+  if trunk_epochs > 0 and trunk_epochs >= nepochs:
+    raise ValueError(
+      f"trunk_epochs ({trunk_epochs}) must be < nepochs "
+      f"({nepochs}): the head needs the remaining epochs")
+
   if model_opts is None:
     model_opts = {"cls": ResMLP,
                   "int_dim_res": 128,
@@ -945,12 +970,15 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
           f"({n_total - n_linear:,} excluding pure linear "
           f"transformations)")
 
-  opt = make_optimizer(model=model,
-                       opt_opts=opt_opts,
-                       lr=learning_rate,
-                       device=device)
-
-  sched = make_scheduler(optimizer=opt, sched_opts=sched_opts)
+  # two-phase capability check, now that the model exists.
+  # set_train_phase is a duck-typed model capability (TemplateResCNN);
+  # hasattr reaches through a torch.compile wrapper, which forwards
+  # attribute lookups to the wrapped module.
+  if trunk_epochs > 0 and not hasattr(model, "set_train_phase"):
+    raise ValueError(
+      "trunk_epochs needs a two-phase model (one defining "
+      "set_train_phase, e.g. rescnn_nla); this model is "
+      f"{type(model).__name__}")
 
   if device.type == "cuda":
     budget = torch.cuda.mem_get_info()[0]   # NVIDIA only
@@ -968,20 +996,67 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
 
   wmupe = lr_opts["warmup_epochs"]
 
-  (train_losses, medians, means,
-   fracs) = training_loop_batched(nepochs=nepochs,
-                                  optimizer=opt,
-                                  scheduler=sched,
-                                  model=model,
-                                  bs=bs,
-                                  lossfn=chi2fn,
-                                  mode=loss_mode,
-                                  data=data,
-                                  thresholds=thresholds,
-                                  warmup_epochs=wmupe,
-                                  trim_opts=trim_opts,
-                                  focus_opts=focus_opts,
-                                  use_amp=use_amp,
-                                  silent=silent)
+  # phases to run: one (nepochs, phase-name) pair for ordinary
+  # training, two for the trunk-then-head schedule. Each pass gets a
+  # FRESH optimizer + scheduler + warmup: make_optimizer collects
+  # every parameter, but frozen ones (requires_grad False) never
+  # receive a gradient and AdamW skips grad-None params entirely --
+  # no step, no state, no weight decay -- so rebuilding per phase
+  # both resets the lr schedule for the new phase and leaves the
+  # frozen group untouched. training_loop_batched restores its own
+  # best-frac>0.2 weights at the end of each pass, so phase 2
+  # starts from phase 1's BEST trunk (not its last epoch), with the
+  # zero-init head making the handoff loss-continuous.
+  if trunk_epochs > 0:
+    plan = [(trunk_epochs, "trunk"),
+            (nepochs - trunk_epochs, "head")]
+  else:
+    plan = [(nepochs, None)]
+
+  train_losses, medians, means, fracs = [], [], [], []
+  for n_pass, phase in plan:
+    if phase is not None:
+      model.set_train_phase(phase)
+
+    # each pass restarts the lr at its base (never the other phase's
+    # decayed floor). The head phase trains a fresh zero-init
+    # subnetwork, so the full base + warmup is the right default; an
+    # optional lr_opts["head_lr_base"] overrides it (same sqrt-batch
+    # rule) when the residual signal wants a cooler start.
+    lr_pass = learning_rate
+    if phase == "head" and "head_lr_base" in lr_opts:
+      lr_pass = (lr_opts["head_lr_base"]
+                 * (bs / lr_opts["bs_base"]) ** 0.5)
+    if phase is not None and not silent:
+      print(f"phase '{phase}': {n_pass} epochs, lr restarts "
+            f"at {lr_pass:.2e} (+ {wmupe}-epoch warmup)")
+
+    opt   = make_optimizer(model=model,
+                           opt_opts=opt_opts,
+                           lr=lr_pass,
+                           device=device)
+    sched = make_scheduler(optimizer=opt, sched_opts=sched_opts)
+
+    (tl, md, mn,
+     fr) = training_loop_batched(nepochs=n_pass,
+                                 optimizer=opt,
+                                 scheduler=sched,
+                                 model=model,
+                                 bs=bs,
+                                 lossfn=chi2fn,
+                                 mode=loss_mode,
+                                 data=data,
+                                 thresholds=thresholds,
+                                 warmup_epochs=wmupe,
+                                 trim_opts=trim_opts,
+                                 focus_opts=focus_opts,
+                                 use_amp=use_amp,
+                                 silent=silent)
+    # histories concatenate across phases: one continuous per-epoch
+    # record, as a single-pass run produces.
+    train_losses += tl
+    medians      += md
+    means        += mn
+    fracs        += fr
 
   return model, train_losses, medians, means, fracs

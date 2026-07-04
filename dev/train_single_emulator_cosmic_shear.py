@@ -252,8 +252,13 @@ def main():
   log(f"device: {exp.device}  |  model: {exp.model_cls.__name__}  |  "
       f"activation: {exp.activation}  |  rescale: {exp.rescale}")
   log(f"model spec: {ta['model']}")
+  # trunk_epochs > 0 = the two-phase schedule (trunk then frozen-trunk
+  # head); print it only when active, so ordinary runs stay unchanged.
+  tk = ta.get("trunk_epochs", 0)
+  ph = (f"  (two-phase: {tk} trunk + {ta['nepochs'] - tk} head)"
+        if tk else "")
   log(f"run: nepochs {ta['nepochs']}  bs {ta['bs']}  "
-      f"loss_mode {ta.get('loss_mode', 'sqrt')}")
+      f"loss_mode {ta.get('loss_mode', 'sqrt')}{ph}")
   # the remaining train_args sub-blocks, one dict per line (optimizer /
   # lr / scheduler / trim / focus), so the whole resolved config is on
   # the terminal.

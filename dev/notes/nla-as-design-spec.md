@@ -70,10 +70,41 @@ conv_head=True (ResCNN, TemplateResCNN) injects geom AND setdefaults
 compile_mode="default" (so rescnn/rescnn_nla no longer crash under
 reduce-overhead unless the YAML overrides). The rescale guard moved
 ABOVE build_geometry's lazy cosmolike import (fail fast + testable
-off-workstation). 19/19 venv tests pass (buffers invert, fold ==
-per-template loop, gate=0 == trunk exactly, grads reach all gates,
-state round-trip, from_config/build_specs injections, make_model
-end-to-end, combine+backward). YAML: model.name: rescnn_nla + uncomment
-the conv-head knobs (kernel_size 11 / channels 16 / n_blocks_cnn 1 /
-gate_init 0.1). Judge vs nla 0.1472 at matched T=256/250k; the bet is
+off-workstation). YAML: model.name: rescnn_nla + uncomment the
+conv-head knobs. Judge vs nla 0.1472 at matched T=256/250k; the bet is
 the dense-decile residual (0.122, untouched by nla) is theta-structured.
+
+**SPEED DIAGNOSIS (2026-07-04 runs on the 3060): the head is
+MEMORY-BANDWIDTH-bound, not FLOP- or launch-bound.** Fold mode's
+intermediates are (3*bs, channels, n_keep) -- ~104 MB each at bs 768 /
+ch 16 / K 705 -- and each CNN block moves ~1.4 GB/step fwd+bwd; the
+3060's ~330 GB/s makes head s/epoch scale as
+(3 if fold else 1) * channels * n_blocks_cnn. Observed: 128w/ch8/1blk
+default = 3.5 s/epoch; 96w/ch16/2blk reduce-overhead = 5.8 -- the jump
+is the 4x head, NOT reduce-overhead failing (it no longer crashes on
+this torch; keep it). nla baseline 0.8 s/epoch.
+
+**FIXES BUILT (2026-07-04, all tested, 52 venv checks):**
+(1) model.template_mix: true -- templates become the conv's input
+CHANNELS (Conv1d 3->C->3 on (B,3,K)) instead of folding into batch:
+identical FLOPs (3x moved from rows into kernel depth), 1/3 the
+traffic (16 JOINT feature maps vs 48 per-template ones -- sharing
+weights never shrinks activations, so this is the only structural way
+down), cross-template features; A1 exactness untouched (it lives in
+the loss combine). Trade: drops the one-shared-kernel inductive bias.
+(2) Zero-init identity head (unconditional): the LAST cnn block's
+output layer is zeroed, H(0)=0 -> corr==0 at init, model == trunk
+exactly; gradient wake-up chain: collapse live at step 1 (through
+gate!=0), conv+gate wake at step 2. Supersedes the gate-must-not-be-0
+concern.
+(3) train_args.trunk_epochs: N -- the user's two-phase schedule:
+phase 1 (1..N) head BYPASSED entirely (set_train_phase("trunk"), pure
+nla cost ~0.8 s/epoch); phase 2 trunk frozen AND under no_grad (no
+trunk backward), head-only training from the identity start ->
+loss-continuous handoff. run_emulator orchestrates as TWO
+training_loop_batched calls (each restores its best + own
+warmup/opt/sched/trim/focus cycle; phase 2 starts from phase 1's BEST
+trunk automatically); histories concatenate. set_train_phase is
+duck-typed (hasattr through the compile wrapper); guards: trunk_epochs
+< nepochs (fails at top), model must define set_train_phase (fails
+after make_model). Banner prints "(two-phase: N trunk + M head)".

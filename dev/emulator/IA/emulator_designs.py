@@ -247,6 +247,17 @@ class TemplateResCNN(nn.Module):
   (B, n_templates, n_keep), what TemplateFactoredChi2 consumes --
   so swapping nla -> rescnn_nla changes only the model.
 
+  The head starts as an exact identity (the last block's output
+  layer is zero-initialized, and the final activation maps 0 -> 0),
+  so at epoch 1 the model IS its trunk -- no random-weight
+  perturbation. That also enables two-phase training
+  (train_args.trunk_epochs > 0, orchestrated by run_emulator via
+  set_train_phase): first train the trunk alone with the head
+  bypassed (pure-TemplateMLP cost per epoch), then freeze the trunk
+  (run under no_grad, no trunk backward) and let the head learn
+  only the residual, starting from the identity so the loss is
+  continuous across the switch.
+
   factored / conv_head are capability flags EmulatorExperiment
   reads: factored picks the AmplitudeFactorGeometry input encoding
   and the template-combining loss; conv_head injects geom (for the
@@ -336,6 +347,35 @@ class TemplateResCNN(nn.Module):
     self.gate = nn.Parameter(
       torch.full((n_templates, 1), float(gate_init)))
 
+    # Zero-init the LAST block's output layer, so the head starts as
+    # an exact identity on the model output: its final activation is
+    # H(x) = gate(x)*x with H(0) = 0, so a zeroed output layer gives
+    # corr = 0 and out = trunk exactly -- no random-weight
+    # perturbation at epoch 1 (or at a phase handoff). Gradients
+    # still reach the zeroed layer (d corr/d w depends on its INPUT,
+    # not its weights), so it grows from 0 as soon as a correction
+    # helps; the earlier blocks wake up one step later, once the
+    # zeroed layer is nonzero. The standard zero-init-residual-
+    # branch trick. Only the last block is zeroed -- zeroing all
+    # would kill every gradient path.
+    last = self.cnn[-1]
+    if isinstance(last.collapse, nn.Conv1d):
+      nn.init.zeros_(last.collapse.weight)
+      nn.init.zeros_(last.collapse.bias)
+    else:
+      # channels == 1 fold block: collapse is Identity, so the one
+      # conv is the output layer; zero it instead.
+      nn.init.zeros_(last.conv.weight)
+      nn.init.zeros_(last.conv.bias)
+
+    # training phase, set by set_train_phase: "joint" (default,
+    # everything trains), "trunk" (head frozen AND bypassed -- the
+    # model runs as a pure TemplateMLP at TemplateMLP cost), "head"
+    # (trunk frozen and run under no_grad -- backward touches the
+    # head only). A plain Python attribute: torch.compile guards on
+    # it and recompiles once per phase switch.
+    self._phase = "joint"
+
     # Frozen basis-change buffers, exactly ResCNN's: x @ W_fd maps
     # full-whitened -> theta order (/sigma), x @ W_df maps back
     # (W_df = W_fd^{-1}). sigma = per-element sqrt(diag cov).
@@ -346,6 +386,38 @@ class TemplateResCNN(nn.Module):
       "W_fd", (sqrt_ev[:, None] * evecs.t()) / sigma[None, :])
     self.register_buffer(
       "W_df", (sigma[:, None] * evecs) / sqrt_ev[None, :])
+
+  def set_train_phase(self, phase):
+    """Switch the two-phase training mode (run_emulator calls this).
+
+    Freezes/unfreezes the parameter groups and sets the forward
+    behavior:
+      "joint" = everything trains, head active (the default).
+      "trunk" = head frozen and BYPASSED: forward returns the bare
+                templates, so phase-1 epochs cost exactly a
+                TemplateMLP (no head compute, no head gradients).
+                With the zero-init head this changes nothing
+                numerically -- corr was already 0.
+      "head"  = trunk frozen and run under no_grad: backward
+                touches only the conv head + gates, so phase-2
+                epochs skip the whole trunk backward. The head
+                starts from its zero-init identity, so the loss is
+                continuous across the switch.
+
+    Arguments:
+      phase = "joint" | "trunk" | "head".
+    """
+    if phase not in ("joint", "trunk", "head"):
+      raise ValueError(f"unknown train phase {phase!r}; "
+                       "use 'joint', 'trunk', or 'head'")
+    self._phase = phase
+    trunk_on = phase in ("joint", "trunk")
+    head_on  = phase in ("joint", "head")
+    for p in self.model.parameters():
+      p.requires_grad_(trunk_on)
+    for p in self.cnn.parameters():
+      p.requires_grad_(head_on)
+    self.gate.requires_grad_(head_on)
 
   def forward(self, x):
     """Map the non-amplitude params to conv-corrected templates.
@@ -360,9 +432,20 @@ class TemplateResCNN(nn.Module):
       in coeff_fn order.
     """
     B = x.shape[0]
-    # trunk templates in the full-whitened basis.
-    y = self.model(x[:, :self.n_in]).view(
-      B, self.n_templates, self.n_keep)      # (B, T, n_keep)
+    # trunk templates in the full-whitened basis. In the "head"
+    # phase the trunk is frozen, so skip building its autograd
+    # graph: no trunk activations stored, no trunk backward.
+    if self._phase == "head":
+      with torch.no_grad():
+        y = self.model(x[:, :self.n_in]).view(
+          B, self.n_templates, self.n_keep)  # (B, T, n_keep)
+    else:
+      y = self.model(x[:, :self.n_in]).view(
+        B, self.n_templates, self.n_keep)    # (B, T, n_keep)
+    # "trunk" phase: the head is frozen at its zero-init identity,
+    # so its output is known to be y -- skip the compute entirely.
+    if self._phase == "trunk":
+      return y
     if self.template_mix:
       # templates as conv channels: the basis change broadcasts the
       # matmul over the leading (B, T) axes, so no fold is needed

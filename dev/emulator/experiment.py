@@ -613,6 +613,10 @@ class EmulatorExperiment:
       nepochs=train_args["nepochs"],
       bs=train_args["bs"],
       loss_mode=train_args.get("loss_mode", "sqrt"),
+      # two-phase schedule (trunk-then-head, rescnn_nla): epochs of
+      # pure-trunk training before the trunk freezes and the head
+      # learns the residual; 0 / absent = ordinary joint training.
+      trunk_epochs=train_args.get("trunk_epochs", 0),
       thresholds=self.thresholds,
       use_amp=self.use_amp,
       silent=silent_run,
