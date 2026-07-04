@@ -290,6 +290,43 @@ LSST_BTA_1, tatt_coeffs, 10 templates; same Template* classes;
 groups 1|10|20; film works at tatt dims) -- BLOCKED only on the
 template training dumps, which do not exist yet. film flag now on
 BOTH head families (cnn + trf).
+END OF DAY 07-04 (authoritative; supersedes items 1/1b/5 above --
+all DONE and production-verified). The day's full arc lives in
+[[nla-as-design-spec]] blocks 04k-04w; state at close:
+LOOP/PERF: compiled fwd_loss (model+loss in one graph; static-shape
+_reduce = sort+mask == topk, tensor trim/focus/KAPPA scalars -- the
+kappa float was the primals_90 CPU-lift that broke CUDA-graph
+replay on recompile, fixed + CONFIRMED gone in production) + eval
+twin fwd_chi2 (consume-per-batch, ~1GB/epoch churn gone) +
+per-chunk pre-shuffle. Contended trunk epochs 2.2-2.4 -> 1.5s;
+head 5.1s with replay. audit_devices() names off-device tensors at
+run start. Option 4 (full-step graph) parked with estimates; at
+10M dvs the game becomes prefetch overlap (H2D), not graphs.
+HEADS: film on BOTH families (cnn + trf; identity-init
+FiLMGenerator per block, conditioning ALWAYS amplitude-blind);
+first evidence STRONG: truncated 150-epoch trunk (frac 0.5000) +
+film head -> 0.2766 by head epoch 22 where the film-less head
+stalled ~0.37; result reproduced across runs. groups (2|3|6,
+pm_kept-validated), separable, rescale_kernel all composed in
+production. TATT LIVE, blocked only on template dumps.
+NEXT (in rough order): (a) transfer-learning practice run (04w:
+per-phase training subsets -- head on independent N/2 rows;
+mechanism NOT built yet: a head: n_train knob slicing disjoint
+rows); (b) n_blocks_cnn sweep 3->5 on the truncated-trunk film
+setup (~4.2k params/block); (c) TATT dumps -> the real
+sample-efficiency comparison; (d) quiet-machine timing numbers
+when amypond's MCMC ends; (e) still parked: positional encoding
+(TRF), film_grouped, conditional LayerNorm.
+TESTS: 14 scratchpad suites, all green at close (rescnn_bins,
+restrf, yaml_activation, phase_lr, warmup_baseline, clip_rewind,
+rescale_kernel, param_split, groups, separable, fwdloss_compile,
+film, trf_film_tatt, device_audit) in
+/private/tmp/claude-501/-Users-vivianmiranda-data-COCOA-june2026-
+emulators-code-dev/b054b93a-.../scratchpad (venv gdvenv there;
+scratchpad survives compaction of THIS session, not a new one --
+recreate from the notes' per-block test descriptions if lost).
+Working tree has everything since the user's last commit.
+
 Historical context (07-04l run): phase 2 collapsed to frac ~0.305
 after head epoch ~272 (untrimmed-chi2 fit the monster tail; full
 post-mortem in [[nla-as-design-spec]] 04l); fixes since = head trim

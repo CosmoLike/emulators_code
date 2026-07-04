@@ -210,8 +210,13 @@ specialized constant) recorded graphs while the head phase
 torch.as_tensor(float(kappa), device=device), once per pass,
 passed as focus_scale (_reduce already accepts tensor scalars;
 bit-exact equivalence verified). No float remains in the traced
-closure. CONFIRM on the next run: skip line gone + faster head
-epochs; if it persists, resume with aot_graphs logging.
+closure. CONFIRMED IN PRODUCTION (user: "success"): skip line GONE, head
+epochs 5.4 -> 5.1s with graph replay restored (modest on the
+small-SM card because the head phase carries real arithmetic; the
+payoff scales on H200/under contention where launch overhead
+dominates). The kappa-lift diagnosis stands proven end to end:
+audit -> eval-graph-clean -> local primals reconstruction ->
+tensor promotion -> skip eliminated.
 
 **TRF FILM + TATT ACTIVATED (2026-07-04v; user: "so no film To
 TRF? Once you do all that you need to implement the TATT version
