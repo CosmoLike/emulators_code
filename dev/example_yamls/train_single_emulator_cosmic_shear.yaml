@@ -54,15 +54,6 @@ train_args:
     #           so the emulator is exact in it and its prior costs zero
     #           training coverage. LSST_A1_2 (the eta power) stays an input.
     #
-    #   nla_as  nla, and also factor the linear-order As amplitude:
-    #             xi = Ats * (K1 + A1 * K2 + A1^2 * K3),  Ats = As / <As>
-    #           (<As> = training-mean As, so Ats ~ 1). The training center
-    #           is scaled per sample (whiten(dv - Ats * center)), so there
-    #           is no constant template. As STILL enters the net as an
-    #           input, because halofit makes the dv nonlinear in As; only
-    #           the linear-order amplitude is pulled out. (Tried 2026-07:
-    #           erased the nla gain; kept for the record.)
-    #
     #   rescnn_nla  nla plus rescnn's 1-D CNN correction head: the trunk
     #           emits the 3 templates and ONE shared gated conv corrects
     #           each of them in theta order before the loss combines
@@ -93,8 +84,8 @@ train_args:
     #                        # graphs trip on the gated skip-add); set it
     #                        # only to override.
     #
-    # nla / nla_as / rescnn_nla need no other kwargs: n_amps and the 3
-    # templates plus the amplitude column names are set automatically
+    # nla / rescnn_nla need no other kwargs: n_amps and the 3 templates
+    # plus the amplitude column names are set automatically
     # (experiment.py).
 
   optimizer:             # cls is fixed to AdamW in the script
