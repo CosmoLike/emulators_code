@@ -95,10 +95,10 @@ MODEL_BLOCK_KEYS = {
   "cnn": {"kernel_size":  "kernel_size",
           "n_blocks":     "n_blocks_cnn",
           "gate_init":    "gate_init"},
-  "trf": {"width":        "int_dim_trf",
+  "trf": {"n_heads":      "n_heads",
           "n_blocks":     "n_blocks_trf",
           "n_mlp_blocks": "n_mlp_blocks",
-          "n_heads":      "n_heads",
+          "shared_mlp":   "shared_mlp",
           "gate_init":    "gate_init"},
 }
 
@@ -194,9 +194,11 @@ class EmulatorExperiment:
                        "activation" ({type, n_gates} or a bare type
                        string; see the `activation` argument below),
                        "cnn" (kernel_size, n_blocks, gate_init; name
-                       rescnn only), "trf" (width, n_heads,
-                       n_blocks, n_mlp_blocks, gate_init; name restrf
-                       only) --
+                       rescnn only), "trf" (n_heads, n_blocks,
+                       n_mlp_blocks, shared_mlp, gate_init; name
+                       restrf only --
+                       the tokens live at the natural bin width, so
+                       there is no width knob) --
                        plus an optional flat "compile_mode".
                        build_specs translates the nesting onto the
                        constructors' flat kwargs (MODEL_BLOCK_KEYS)

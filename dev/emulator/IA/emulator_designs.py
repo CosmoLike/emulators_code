@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from ..activations import activation_fcn
 from ..emulator_designs_building_blocks import (
-  Affine, ResBlock, BinLinear, TRFBlock)
+  Affine, ResBlock, TRFBlock)
 
 
 class NLATemplateMLP(nn.Module):
@@ -421,35 +421,35 @@ class TemplateResCNN(nn.Module):
 
 class TemplateResTRF(nn.Module):
   """
-  Factored IA emulator with a bin-token transformer correction
-  head: the TemplateMLP trunk emits n_templates whitened templates,
-  and a transformer whose TOKENS are the tomographic bins corrects
+  Factored IA emulator with a transformer correction head: the
+  TemplateMLP trunk emits n_templates whitened templates, and a
+  transformer whose TOKENS are the (template, bin) pairs corrects
   them before the loss combines them in closed form. The amplitude
   polynomial is untouched, so the correction inherits the factored
   design's exactness in the amplitudes (that exactness lives in the
   loss's combine; the head only ever sees amplitude-blind
   templates).
 
-  How the templates enter the head: token = bin, and each token's
-  feature vector is that bin's theta segment from ALL n_templates
-  templates concatenated -- the transformer analogue of the conv
-  head's channels choice (TemplateResCNN puts the (template, bin)
-  pairs on the channel axis). Corrections are therefore cross-template
-  AND cross-bin: attention shares information across bins, the
-  concatenated features share it across templates, and each bin's
-  own MLP stack (BinLinear; the deviation from the textbook shared
-  FFN, which also replaces the positional encoding) specializes
-  the result. Bins differ in length, so each is padded to max_bin
+  The tokens live at their NATURAL width (max_bin, the padded bin
+  length), with no embedding in and no projection out -- the same
+  no-adapter design as ResTRF, and the same pairs-as-tokens move as
+  the conv head's pairs-as-channels (TemplateResCNN). Attention
+  therefore runs across ALL n_templates*n_bins tokens at once:
+  cross-bin AND cross-template in one map; each token's own MLP
+  stack (BinLinear; the deviation from the textbook shared FFN,
+  which also replaces the positional encoding) specializes its
+  correction. Bins differ in length, so each is padded to max_bin
   inside a fixed pad_idx buffer (scatter to pad, gather to unpad;
   pad slots stay zero).
 
-  The head starts as an exact identity (zero-initialized output
-  projection; corr = 0), enabling the two-phase schedule
-  (train_args.trunk_epochs, orchestrated by run_emulator via
-  set_train_phase): first the trunk alone with the head bypassed
-  (pure-TemplateMLP cost), then the trunk frozen under no_grad
-  while the head learns only the residual, loss-continuous at the
-  handoff.
+  The correction is corr = blocks(h) - h: every TRFBlock is exactly
+  the identity at init (zero-initialized branch outputs, see
+  TRFBlock), so corr = 0 and the model IS its trunk at epoch 1 --
+  enabling the two-phase schedule (train_args.trunk_epochs,
+  orchestrated by run_emulator via set_train_phase): first the
+  trunk alone with the head bypassed (pure-TemplateMLP cost), then
+  the trunk frozen under no_grad while the head learns only the
+  residual, loss-continuous at the handoff.
 
   factored / needs_geom / needs_bins are capability flags
   EmulatorExperiment reads: factored picks AmplitudeFactorGeometry
@@ -463,9 +463,9 @@ class TemplateResTRF(nn.Module):
   needs_bins = True
 
   def __init__(self, input_dim, output_dim, n_amps,
-               n_templates, int_dim_res, geom, int_dim_trf=32,
-               n_heads=4, n_blocks=4, n_blocks_trf=1,
-               n_mlp_blocks=2, gate_init=0.1, block_opts=None):
+               n_templates, int_dim_res, geom, n_heads=2,
+               n_blocks=4, n_blocks_trf=1, n_mlp_blocks=2,
+               gate_init=0.1, shared_mlp=False, block_opts=None):
     """Build the template trunk, the TRF head, the buffers.
 
     Arguments:
@@ -481,15 +481,21 @@ class TemplateResTRF(nn.Module):
       geom         = full-whitening DataVectorGeometry carrying
                      bin_sizes; its evecs / sqrt_ev define the
                      basis buffers.
-      int_dim_trf  = token embedding width (divisible by n_heads).
-      n_heads      = attention heads per TRFBlock.
+      n_heads      = attention heads per TRFBlock; must divide the
+                     token width max_bin (a bin length of 26 allows
+                     1 / 2 / 13; default 2).
       n_blocks     = residual blocks in the trunk.
       n_blocks_trf = stacked transformer blocks.
-      n_mlp_blocks = depth of each bin's private MLP stack inside
+      n_mlp_blocks = depth of each token's private MLP stack inside
                      every TRFBlock.
       gate_init    = initial per-template correction scale (small,
                      not 0 -- a 0 gate strands the head with no
                      gradient).
+      shared_mlp   = False (default): per-token unique MLPs. True:
+                     one MLP shared by every (template, bin) token
+                     -- the textbook block, the ablation isolating
+                     the unique-MLP deviation (see TRFBlock's
+                     permutation-equivariance caveat).
       block_opts   = ResBlock options (None -> {}); its "act" also
                      reaches the TRF MLPs, so head and trunk share
                      one activation family.
@@ -533,28 +539,21 @@ class TemplateResTRF(nn.Module):
     self.register_buffer(
       "pad_idx", torch.tensor(pos, dtype=torch.long))
 
-    # the head: token = bin, features = the bin's segment from all
-    # templates concatenated (n_templates * max_bin wide), embedded
-    # per bin, corrected by the TRF blocks, projected back per bin.
+    # the head: n_blocks_trf transformer blocks straight on the
+    # (template, bin) tokens at their natural width max_bin -- no
+    # embedding, no output projection (the same pairs-as-tokens move
+    # as the conv head's pairs-as-channels). Every block is the
+    # identity at init, so blocks(h) - h = 0 exactly. The trunk's
+    # activation reaches the TRF MLPs too.
     trf_act = block_opts.get("act", activation_fcn)
-    self.embed = BinLinear(self.n_bins,
-                           n_templates * self.max_bin, int_dim_trf)
     trf = []
     for _ in range(n_blocks_trf):
-      trf.append(TRFBlock(int_dim_trf, n_bins=self.n_bins,
+      trf.append(TRFBlock(self.max_bin,
+                          n_tokens=n_templates * self.n_bins,
                           n_heads=n_heads,
                           n_mlp_blocks=n_mlp_blocks,
-                          act=trf_act))
+                          act=trf_act, shared_mlp=shared_mlp))
     self.trf = nn.ModuleList(trf)
-    self.out = BinLinear(self.n_bins, int_dim_trf,
-                         n_templates * self.max_bin)
-
-    # zero-init the output projection: corr = 0 at init, so the
-    # model starts as its trunk exactly (identity start; the same
-    # wake-up chain as the conv heads -- out's weights get real
-    # gradients through the nonzero gate at step 1).
-    nn.init.zeros_(self.out.weight)
-    nn.init.zeros_(self.out.bias)
 
     # one learnable gate per template, (n_templates, 1) so it
     # broadcasts over (B, n_templates, n_keep).
@@ -596,11 +595,7 @@ class TemplateResTRF(nn.Module):
     head_on  = phase in ("joint", "head")
     for p in self.model.parameters():
       p.requires_grad_(trunk_on)
-    for p in self.embed.parameters():
-      p.requires_grad_(head_on)
     for p in self.trf.parameters():
-      p.requires_grad_(head_on)
-    for p in self.out.parameters():
       p.requires_grad_(head_on)
     self.gate.requires_grad_(head_on)
 
@@ -638,24 +633,21 @@ class TemplateResTRF(nn.Module):
     padded = h.new_zeros(B, self.n_templates,
                          self.n_bins * self.max_bin)
     padded[..., self.pad_idx] = h
-    # (B, T, G, max_bin) -> (B, G, T, max_bin) -> (B, G, T*max_bin):
-    # one token per bin, features = all templates' segments.
-    # permute reorders the axes without copying (a view with
-    # rearranged strides); the following reshape then materializes
-    # the merged trailing axis (permuted tensors are not
-    # contiguous, so reshape copies -- view would raise).
-    t = padded.view(B, self.n_templates, self.n_bins, self.max_bin)
-    t = t.permute(0, 2, 1, 3).reshape(
-      B, self.n_bins, self.n_templates * self.max_bin)
-    t = self.embed(t)                        # (B, G, int_dim_trf)
+    # (B, T, G*max_bin) -> (B, T*G, max_bin): one token per
+    # (template, bin) pair at its natural width, template-major --
+    # the same order as the conv head's channels. view is free
+    # (padded is contiguous).
+    t0 = padded.view(B, self.n_templates * self.n_bins,
+                     self.max_bin)
+    t = t0
     for blk in self.trf:
-      t = blk(t)                             # cross-bin attention
-    t = self.out(t)                          # (B, G, T*max_bin)
-    # invert the token packing: back to (B, T, G*max_bin), gather
-    # the real entries out of the padding, return to the
-    # full-whitened basis, add through the per-template gate.
-    t = t.view(B, self.n_bins, self.n_templates, self.max_bin)
-    t = t.permute(0, 2, 1, 3).reshape(
-      B, self.n_templates, self.n_bins * self.max_bin)
-    corr = t[..., self.pad_idx]              # (B, T, n_keep)
+      t = blk(t)                    # cross-bin + cross-template
+    # the correction is what the blocks ADDED (t - t0 = 0 at init:
+    # every block starts as the identity). Unpack the tokens back to
+    # (B, T, G*max_bin), gather the real entries out of the padding,
+    # return to the full-whitened basis, add through the
+    # per-template gate.
+    corr = (t - t0).view(B, self.n_templates,
+                         self.n_bins * self.max_bin)
+    corr = corr[..., self.pad_idx]           # (B, T, n_keep)
     return y + self.gate * (corr @ self.W_df)

@@ -106,10 +106,9 @@ train_args:
     #           costs zero training coverage. LSST_A1_2 (the eta
     #           power) stays an input. With name: rescnn / restrf the
     #           gated head corrects the templates before the combine
-    #           (conv: templates as channels; trf: each bin token's
-    #           features carry all 3 templates' segments) -- the
-    #           polynomial is untouched, so the correction stays
-    #           exact in A1.
+    #           (both treat the (template, bin) pairs as their units:
+    #           conv channels / attention tokens) -- the polynomial is
+    #           untouched, so the correction stays exact in A1.
     #
     #   tatt    Reserved (3 amplitudes, 10 templates) -- errors until
     #           its training dumps exist.
@@ -151,16 +150,22 @@ train_args:
     #   n_blocks:    1     # stacked conv+activation blocks
     #   gate_init:   0.1   # initial correction scale (small, not 0)
     #
-    # Transformer head (name: restrf only): each bin is one token,
-    # attention shares information across bins, each bin gets its own
-    # private MLP stack.
+    # Transformer head (name: restrf only): each bin is one token AT
+    # ITS NATURAL WIDTH (the padded bin length -- no embedding layer
+    # in, no projection out, so no width knob and no adapter
+    # parameters; with ia: nla the tokens are the (template, bin)
+    # pairs). Attention shares information across the tokens; each
+    # token gets its own private MLP stack.
     # trf:
-    #   width:        32   # token embedding width (divisible by n_heads)
-    #   n_heads:      4    # parallel attention patterns; same params
-    #                      # and FLOPs at any value (the d/H-narrow dot
-    #                      # products cancel the H-fold pattern count)
+    #   n_heads:      2    # parallel attention patterns; same params
+    #                      # and FLOPs at any value, but must divide
+    #                      # the bin length (26 -> 1 | 2 | 13)
     #   n_blocks:     1    # stacked transformer blocks
-    #   n_mlp_blocks: 2    # each bin's private MLP depth per block
+    #   n_mlp_blocks: 2    # each token's private MLP depth per block
+    #   shared_mlp: false  # true = ONE MLP for every token (the
+    #                      # textbook block; ablation of the unique-MLP
+    #                      # deviation -- then nothing structural tells
+    #                      # tokens apart, no positional encoding)
     #   gate_init:    0.1  # initial correction scale (small, not 0)
     #
     # compile_mode: default  # conv/TRF models default to this because

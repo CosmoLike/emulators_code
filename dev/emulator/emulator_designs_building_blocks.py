@@ -104,35 +104,37 @@ class ResBlock(nn.Module):
 class BinLinear(nn.Module):
   """
   G independent Linear(in_features, out_features) layers -- one per
-  tomographic bin -- run as a single batched einsum instead of a
-  Python loop over G modules. The weights stack into (G, in, out),
-  the biases into (G, out); bin g's rows only ever meet weight[g].
+  token -- run as a single batched einsum instead of a Python loop
+  over G modules. The weights stack into (G, in, out), the biases
+  into (G, out); token g's rows only ever meet weight[g].
 
-  This is the "unique per bin" piece of the ResTRF head: a standard
-  transformer applies ONE shared MLP to every token, whereas here
-  each bin (token) gets its own weights. The bins are physically
-  distinct (different source pairs and xi+/- branches), and the
-  unique weights also make them distinguishable to the model --
-  doing the job a positional encoding does in a standard
-  transformer, so ResTRF needs none.
+  This is the "unique per token" piece of the ResTRF head: a
+  standard transformer applies ONE shared MLP to every token,
+  whereas here each token gets its own weights. The tokens are
+  physically distinct -- a tomographic bin (plain ResTRF) or a
+  (template, bin) pair (the factored version) -- and the unique
+  weights also make them distinguishable to the model, doing the
+  job a positional encoding does in a standard transformer, so
+  ResTRF needs none.
 
-  These per-bin layers live in the correction HEAD, after attention
-  has shared information across bins -- the trunk's parameter
-  sharing (the expensive cosmology map, learned once) is untouched.
+  These per-token layers live in the correction HEAD, after
+  attention has shared information across tokens -- the trunk's
+  parameter sharing (the expensive cosmology map, learned once) is
+  untouched.
 
   Arguments:
-    n_bins       = number of independent bins G (= tokens).
-    in_features  = input width per bin.
-    out_features = output width per bin.
+    n_tokens     = number of independent tokens G.
+    in_features  = input width per token.
+    out_features = output width per token.
   """
-  def __init__(self, n_bins, in_features, out_features):
+  def __init__(self, n_tokens, in_features, out_features):
     super().__init__()
     # build G ordinary nn.Linear layers just to borrow their init,
     # then stack their weights/biases and discard them. l.weight is
     # (out, in); .t() -> (in, out) for the einsum; stack adds the
-    # bin axis.
+    # token axis.
     lins = []
-    for _ in range(n_bins):
+    for _ in range(n_tokens):
       lins.append(nn.Linear(in_features=in_features,
                             out_features=out_features))
     weights, biases = [], []
@@ -144,37 +146,60 @@ class BinLinear(nn.Module):
 
   def forward(self, x):
     # x: (B, G, in). einsum("bgi,gio->bgo", x, weight): g appears in
-    # both operands and the output, so it is a batch axis -- bin g
+    # both operands and the output, so it is a batch axis -- token g
     # uses weight[g] only, all G in one batched matmul; i appears in
     # both inputs but not the output, so einsum sums over it (the
     # matmul contraction); b and o are kept.
     y = torch.einsum("bgi,gio->bgo", x, self.weight)
-    # bias (G, out) broadcasts over the B axis: every sample's bin g
-    # gets bin g's bias.
+    # bias (G, out) broadcasts over the B axis: every sample's token
+    # g gets token g's bias.
     return y + self.bias
 
 
 class TRFBlock(nn.Module):
   """
-  One transformer block over bin tokens: self-attention across the
-  G bins, then a per-bin MLP branch -- both pre-norm residual
+  One transformer block over tokens at their NATURAL width: no
+  embedding in, no projection out -- the tokens are the (padded)
+  physical bin segments themselves, so dim = the bin length. (A
+  learned embedding is what a transformer needs when its sequence
+  is synthetic -- a latent split into tokens; here the sequence
+  structure is physical, so the adapter layers and their
+  parameters are simply not needed.) Self-attention across the G
+  tokens, then a per-token MLP branch -- both pre-norm residual
   branches, as in a standard pre-LN transformer.
 
   Two deliberate deviations from the textbook block:
-  - the TOKENS are the tomographic bins: each (xi+/-, source-pair)
-    bin's theta segment is one token, so attention shares
-    information across bins (the cross-bin correlations a per-bin
-    conv cannot see);
-  - the position-wise MLP is NOT shared: each bin has its own
-    n_mlp_blocks-deep stack (BinLinear), where a standard
-    transformer applies one shared MLP to every token. The unique
-    weights specialize each bin's correction and stand in for the
-    positional encoding (see BinLinear).
+  - the TOKENS are physical: a tomographic bin's theta segment
+    (plain ResTRF) or a (template, bin) pair's (the factored
+    version), so attention shares information across bins (the
+    cross-bin correlations a within-bin conv cannot see);
+  - the position-wise MLP is NOT shared (by default): each token
+    has its own n_mlp_blocks-deep stack (BinLinear), where a
+    standard transformer applies one shared MLP to every token.
+    The unique weights specialize each token's correction and
+    stand in for the positional encoding (see BinLinear).
+    shared_mlp=True restores the textbook shared MLP -- the
+    ablation baseline isolating that deviation. Caveat: with the
+    MLP shared (and the attention maps always shared), NOTHING in
+    the block tells the tokens apart structurally -- the head
+    becomes permutation-equivariant over tokens, with no
+    positional encoding; token identity then comes only from the
+    segments' content.
 
   The attention projections (wq / wk / wv / wo) ARE shared across
-  bins, as in any transformer -- shared maps are what let every bin
-  attend to every other with one set of weights; the per-bin
-  specialization lives in the MLPs.
+  tokens, as in any transformer -- shared maps are what let every
+  token attend to every other with one set of weights; the
+  per-token specialization lives in the MLPs.
+
+  The block is EXACTLY the identity at init: both branch outputs
+  (wo and the last MLP layer) are zero-initialized, so x passes
+  through untouched. A stack of these blocks therefore satisfies
+  blocks(x) == x at init, which is what lets the ResTRF head
+  define its correction as blocks(h) - h == 0 -- the zero-init
+  identity start, with no output projection to host it. Gradients
+  still reach the zeroed layers (their grads depend on their
+  INPUTS, not their weights); the layers behind them wake one
+  step later.
 
   LayerNorm (not the package's Affine) opens both branches: the
   softmax's saturation depends on the score scale, so attention
@@ -182,20 +207,27 @@ class TRFBlock(nn.Module):
   stable-training default for transformers.
 
   Arguments:
-    dim          = token embedding width (must divide by n_heads).
-    n_bins       = number of bin tokens G.
+    dim          = token width = the padded bin length (must divide
+                   by n_heads; a bin length of 26 allows 1 / 2 /
+                   13).
+    n_tokens     = number of tokens G.
     n_heads      = attention heads (each head attends over all G
-                   bins with dim/n_heads of the features).
-    n_mlp_blocks = depth of each bin's private MLP stack.
+                   tokens with dim/n_heads of the features).
+    n_mlp_blocks = depth of each token's private MLP stack.
     act          = activation factory act(dim) -> module for the MLP
                    layers (the run's activation; defaults to
                    activation_fcn, the paper's H).
+    shared_mlp   = False (default): per-token unique MLPs
+                   (BinLinear). True: ONE MLP shared by every token
+                   (plain nn.Linear applied position-wise) -- the
+                   textbook block, see the caveat above.
   """
-  def __init__(self, dim, n_bins, n_heads=4, n_mlp_blocks=2,
-               act=activation_fcn):
+  def __init__(self, dim, n_tokens, n_heads=2, n_mlp_blocks=2,
+               act=activation_fcn, shared_mlp=False):
     super().__init__()
     assert dim % n_heads == 0, (
-      f"int_dim_trf ({dim}) must be divisible by n_heads ({n_heads})")
+      f"the token width ({dim} = the padded bin length) must be "
+      f"divisible by n_heads ({n_heads})")
     self.n_heads = n_heads
     self.d_head  = dim // n_heads
 
@@ -206,18 +238,32 @@ class TRFBlock(nn.Module):
     self.wv = nn.Linear(in_features=dim, out_features=dim)
     self.wo = nn.Linear(in_features=dim, out_features=dim)
 
-    # per-bin MLP branch: pre-norm, n_mlp_blocks unique layers per
-    # bin, each its own activation instance.
+    # MLP branch: pre-norm, n_mlp_blocks layers, each its own
+    # activation instance. Per-token unique (BinLinear) by default;
+    # with shared_mlp one nn.Linear serves every token (a Linear on
+    # a (B, G, dim) tensor applies position-wise to the last axis,
+    # which is exactly the textbook transformer FFN).
     self.ln_mlp = nn.LayerNorm(dim)
     lins, acts = [], []
     for _ in range(n_mlp_blocks):
-      lins.append(BinLinear(n_bins, dim, dim))
+      if shared_mlp:
+        lins.append(nn.Linear(in_features=dim, out_features=dim))
+      else:
+        lins.append(BinLinear(n_tokens, dim, dim))
       acts.append(act(dim))
     self.mlp_lins = nn.ModuleList(lins)
     self.mlp_acts = nn.ModuleList(acts)
 
+    # identity at init: zero both branch OUTPUTS (see docstring).
+    # The final MLP activation maps 0 -> 0 (H(x) = gate(x)*x), so a
+    # zeroed last layer silences the whole branch.
+    nn.init.zeros_(self.wo.weight)
+    nn.init.zeros_(self.wo.bias)
+    nn.init.zeros_(self.mlp_lins[-1].weight)
+    nn.init.zeros_(self.mlp_lins[-1].bias)
+
   def forward(self, x):
-    # x: (B, G, dim) -- G bin tokens of width dim.
+    # x: (B, G, dim) -- G tokens of width dim.
     B, G, _ = x.shape
 
     # --- attention branch (pre-LN residual) ---

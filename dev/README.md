@@ -635,8 +635,8 @@ The small `nn.Module`s the models are assembled from.
 
 - `Affine` — a learnable scalar scale + shift.
 - `ResBlock` — width-preserving residual block (n dense layers, each with a norm + activation factory, pre-activation skip).
-- `BinLinear` — G per-bin *unique* linear layers as one batched einsum; the unique weights also replace the positional encoding.
-- `TRFBlock` — one pre-LN transformer block whose tokens are the tomographic bins: shared-weight attention across bins + a per-bin unique MLP stack (the deviation from the textbook shared FFN).
+- `BinLinear` — G per-token *unique* linear layers as one batched einsum; the unique weights also replace the positional encoding.
+- `TRFBlock` — one pre-LN transformer block over tokens at their *natural* width (the padded bin length — no embedding/output adapters): shared-weight attention across tokens + a per-token unique MLP stack (the deviation from the textbook shared FFN). Exactly the identity at init (zero-initialized branch outputs), so a stack satisfies `blocks(x) == x`.
 
 ### `emulator/emulator_designs.py` <a name="apx-emulator_designs"></a>
 
@@ -655,7 +655,7 @@ The full networks.
               y + gate · correction   ─▶   whitened data vector
 ```
 
-- `ResTRF` — ResMLP trunk + a gated bin-token transformer correction: the theta-order dv splits into its (xi+/-, source-pair) bins (`pad_idx` scatter/gather to a padded per-bin layout, `bin_sizes` from `build_shear_angle_map`), each bin is one token, `TRFBlock`s attend across bins, and a zero-initialized per-bin output projection makes the head an exact identity at epoch 1.
+- `ResTRF` — ResMLP trunk + a gated bin-token transformer correction: the theta-order dv splits into its (xi+/-, source-pair) bins (`pad_idx` scatter/gather to a padded per-bin layout, `bin_sizes` from `build_shear_angle_map`), each bin is one token at its natural width, `TRFBlock`s attend across bins, and the correction is `blocks(h) − h` — zero at epoch 1 because every block starts as the identity. No embedding or output layers (the sequence structure is physical, unlike the published CMB design's latent sequence).
 
 ### `emulator/loss_functions.py` <a name="apx-loss_functions"></a>
 

@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from .activations import activation_fcn
 from .emulator_designs_building_blocks import (
-  Affine, ResBlock, BinLinear, TRFBlock)
+  Affine, ResBlock, TRFBlock)
 
 
 class ResMLP(nn.Module):
@@ -271,11 +271,19 @@ class ResTRF(nn.Module):
   and gathers the corrections back; the pad positions stay zero and
   drop at the gather).
 
-  The head starts as an exact identity: the final per-bin
-  projection (out) is zero-initialized, so corr = 0 and the model
-  IS its trunk at epoch 1 -- the same zero-init-residual-branch
-  start as the conv heads, with the same wake-up chain (out's
-  weights get real gradients through the nonzero gate at step 1).
+  The tokens live at their NATURAL width: max_bin, the padded bin
+  length. There is deliberately NO embedding layer in and NO output
+  projection out -- those adapters are what a transformer needs
+  when its sequence is synthetic (a flat latent split into tokens,
+  as in the published CMB design, where they were the parameter-
+  heaviest layers); here the sequence structure is physical, so the
+  raw bin segments are the tokens and the blocks' output is already
+  in dv layout. The correction is corr = blocks(h) - h: every
+  TRFBlock is exactly the identity at init (its branch outputs are
+  zero-initialized, see TRFBlock), so corr = 0 and the model IS its
+  trunk at epoch 1 -- the same zero-init identity start as the conv
+  heads, with the same wake-up chain (the zeroed branch layers get
+  real gradients through the nonzero gate at step 1).
 
   needs_geom / needs_bins are capability flags EmulatorExperiment
   reads: geom injected (basis buffers + bin sizes), compile_mode
@@ -289,14 +297,19 @@ class ResTRF(nn.Module):
     geom         = full-whitening DataVectorGeometry carrying
                    bin_sizes; its evecs / sqrt_ev define the basis
                    buffers.
-    int_dim_trf  = token embedding width (divisible by n_heads).
-    n_heads      = attention heads per TRFBlock.
+    n_heads      = attention heads per TRFBlock; must divide the
+                   token width max_bin (a bin length of 26 allows
+                   1 / 2 / 13; default 2).
     n_blocks     = residual blocks in the trunk.
     n_blocks_trf = stacked transformer blocks.
     n_mlp_blocks = depth of each bin's private MLP stack inside
                    every TRFBlock.
     gate_init    = initial correction-gate scale (small, not 0 --
                    a 0 gate strands the head with no gradient).
+    shared_mlp   = False (default): per-bin unique MLPs. True: one
+                   MLP shared by every bin -- the textbook block,
+                   the ablation isolating the unique-MLP deviation
+                   (see TRFBlock's permutation-equivariance caveat).
     block_opts   = ResBlock options (None -> {}); its "act" also
                    reaches the TRF MLPs, so head and trunk share
                    one activation family.
@@ -305,8 +318,8 @@ class ResTRF(nn.Module):
   needs_bins = True
 
   def __init__(self, input_dim, output_dim, int_dim_res, geom,
-               int_dim_trf=32, n_heads=4, n_blocks=4,
-               n_blocks_trf=1, n_mlp_blocks=2, gate_init=0.1,
+               n_heads=2, n_blocks=4, n_blocks_trf=1,
+               n_mlp_blocks=2, gate_init=0.1, shared_mlp=False,
                block_opts=None):
     super().__init__()
     if block_opts is None:
@@ -343,26 +356,19 @@ class ResTRF(nn.Module):
     self.register_buffer(
       "pad_idx", torch.tensor(pos, dtype=torch.long))
 
-    # the head: per-bin embedding -> n_blocks_trf transformer blocks
-    # -> per-bin output projection, all bin-unique (BinLinear). The
-    # trunk's activation reaches the TRF MLPs too.
+    # the head: n_blocks_trf transformer blocks straight on the
+    # padded bin tokens (width = max_bin; no embedding, no output
+    # projection). Every block is the identity at init, so
+    # blocks(h) - h = 0 exactly. The trunk's activation reaches the
+    # TRF MLPs too.
     trf_act = block_opts.get("act", activation_fcn)
-    self.embed = BinLinear(self.n_bins, self.max_bin, int_dim_trf)
     trf = []
     for _ in range(n_blocks_trf):
-      trf.append(TRFBlock(int_dim_trf, n_bins=self.n_bins,
+      trf.append(TRFBlock(self.max_bin, n_tokens=self.n_bins,
                           n_heads=n_heads,
                           n_mlp_blocks=n_mlp_blocks,
-                          act=trf_act))
+                          act=trf_act, shared_mlp=shared_mlp))
     self.trf = nn.ModuleList(trf)
-    self.out = BinLinear(self.n_bins, int_dim_trf, self.max_bin)
-
-    # zero-init the output projection: corr = 0 at init, so the
-    # model starts as its trunk exactly (the zero-init-residual-
-    # branch trick; gradients reach the zeroed layer through the
-    # nonzero gate, the rest of the head wakes one step later).
-    nn.init.zeros_(self.out.weight)
-    nn.init.zeros_(self.out.bias)
 
     # learnable scalar gate on the correction (small init, not 0).
     self.gate = nn.Parameter(torch.tensor(float(gate_init)))
@@ -386,14 +392,18 @@ class ResTRF(nn.Module):
     # assignment places the n_keep real entries.
     padded = h.new_zeros(h.shape[0], self.n_bins * self.max_bin)
     padded[:, self.pad_idx] = h
-    # (B, G*max_bin) -> (B, G, max_bin): each bin one token row.
-    t = padded.view(-1, self.n_bins, self.max_bin)
-    t = self.embed(t)                 # (B, G, int_dim_trf)
+    # (B, G*max_bin) -> (B, G, max_bin): each bin one token row, at
+    # its natural width -- the blocks run directly on these.
+    t0 = padded.view(-1, self.n_bins, self.max_bin)
+    t = t0
     for blk in self.trf:
       t = blk(t)                      # cross-bin attention + MLPs
-    t = self.out(t)                   # (B, G, max_bin)
-    # gather the real entries back out of the padded layout
+    # the correction is what the blocks ADDED: every block is the
+    # identity at init, so t - t0 = 0 exactly at epoch 1 (the
+    # identity start, with no output projection needed to host it).
+    # Gather the real entries back out of the padded layout
     # (dropping the pad slots), then return to the full-whitened
     # basis and add through the gate.
-    corr = t.reshape(-1, self.n_bins * self.max_bin)[:, self.pad_idx]
+    corr = (t - t0).reshape(
+      -1, self.n_bins * self.max_bin)[:, self.pad_idx]
     return y + self.gate * (corr @ self.W_df)

@@ -95,6 +95,48 @@ on the Template variants only). Params per block: C^2*k + C (plain
 G=30: ~9.9k; nla T*G=90: ~89k at k=11). Old test files
 test_rescnn_nla/test_mix_and_phases superseded by test_rescnn_bins.
 
+**ResTRF ADAPTERS DELETED (2026-07-04h, user: the paper's embed/output
+layers were its parameter-heaviest pieces and existed only because its
+TRF lived on a SYNTHETIC latent sequence -- ours is physical).** No
+embedding in, no projection out: tokens are the raw padded bin
+segments at NATURAL width max_bin (plain: 30 bin tokens; nla: the
+(template, bin) pairs = 90 tokens, mirroring the conv's
+pairs-as-channels). The width knob is GONE (trf: has only n_heads /
+n_blocks / n_mlp_blocks / gate_init; a stale trf.width errors).
+n_heads must divide max_bin (26 -> 1|2|13; default 2). Identity start
+moved INTO TRFBlock: both branch outputs (wo + last MLP BinLinear)
+are zero-initialized so every block == identity at init, and the
+models define corr = blocks(h) - h == 0 at epoch 1 (no out layer to
+host the zero-init). Head params HALVED: plain 119k -> ~45k; nla 221k
+-> ~110k at real scale (90 tokens x width 24; MLPs dominate, 2x90x
+(24^2+24)). BinLinear/TRFBlock params renamed n_bins -> n_tokens.
+trf.shared_mlp flag (2026-07-04i, user request): true = ONE textbook
+MLP shared by every token (plain nn.Linear position-wise) -- the
+ablation isolating the unique-MLP deviation; params drop by another
+factor n_tokens on the MLPs. CAVEAT (documented): with shared MLP +
+shared attention the head is permutation-equivariant over tokens (the
+unique weights WERE the positional encoding); token identity then
+comes only from segment content. Default false (unique).
+
+**TO DISCUSS (user, 2026-07-04, deferred -- "I am tired"): POSITIONAL
+ENCODING in the TRF, and whether position matters more generally in
+our designs.** User's instinct: shared_mlp probably NEEDS a positional
+encoding ("yes we need to add some positional encoding no?"). Context
+for the discussion: (a) shared_mlp mode is the ONLY position-blind
+piece in the package -- unique MLPs (default) encode position by
+having per-token weights; the conv head's bins-as-channels is
+position-aware (each channel pair has its own kernel slice); the
+dense trunk is position-aware by construction; (b) the cheap standard
+fix = a learned additive per-token embedding, a (n_tokens, max_bin)
+parameter added to the tokens before the blocks (~2.3k params at
+90x26 -- negligible), which would make shared_mlp a CLEAN
+specialization-only ablation (position kept, specialization removed)
+instead of the current combined ablation; (c) fixed sinusoidal
+encodings make little sense here (tokens have physical identities,
+not sequence order); (d) open general question: does the theta axis
+WITHIN a token also want position info (the conv gets it from kernel
+locality; attention sees theta only through the token features).
+
 **ResTRF BUILT (2026-07-04c, user-commissioned; 32 venv checks).**
 The bin-token transformer architecture, name: restrf (+ ia: nla ->
 TemplateResTRF). Gated correction appendix like rescnn (user: "lets

@@ -60,11 +60,12 @@ train_args:
     #   kernel_size: [11, 5, 21, int]
     #   n_blocks:    [1, 1, 3, int]
     #   gate_init:   0.1
-    # trf:                   # name: restrf only
-    #   width:        [32, 16, 64, int]   # keep divisible by n_heads
-    #   n_heads:      4
+    # trf:                   # name: restrf only (tokens at the natural
+    #                        # bin width -- no width knob)
+    #   n_heads:      2      # must divide the bin length (26 -> 1|2|13)
     #   n_blocks:     [1, 1, 3, int]
     #   n_mlp_blocks: [2, 1, 4, int]
+    #   shared_mlp:   false    # true = textbook shared-MLP ablation
     #   gate_init:    0.1
     # compile_mode: default  # conv/TRF models already default to this
     #                        # (reduce-overhead is worth one retry)

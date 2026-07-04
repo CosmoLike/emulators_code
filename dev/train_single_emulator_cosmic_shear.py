@@ -49,8 +49,8 @@
 #    network; then one NESTED sub-block per component: mlp {width,
 #    n_blocks} = the trunk; activation {type, n_gates}; cnn {kernel_size,
 #    n_blocks, gate_init} for rescnn (the bins are the conv channels);
-#    trf {width, n_heads, n_blocks, n_mlp_blocks, gate_init} for restrf),
-#    optional
+#    trf {n_heads, n_blocks, n_mlp_blocks, shared_mlp, gate_init} for
+#    restrf, whose tokens live at the natural bin width), optional
 #    trunk_epochs (two-phase schedule) + symmetric trunk / head blocks
 #    (per-phase overrides over the shared defaults: lr_base / loss_mode /
 #    trim / focus), optimizer (weight_decay),
