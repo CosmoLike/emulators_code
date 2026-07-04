@@ -42,13 +42,14 @@
 #    cosmolike dataset (cosmolike_data_dir, cosmolike_dataset; resolved under
 #    $ROOTDIR/external_modules/data, not --root).
 #  - `train_args`: knobs (nepochs, bs, loss_mode, silent) plus sub-blocks model
-#    (name = resmlp | rescnn | nla | rescnn_nla, then kwargs: int_dim_res,
-#    n_blocks; for the conv-headed models kernel_size / channels /
-#    n_blocks_cnn / gate_init; nla = the factored intrinsic-alignment
-#    design, which emits three templates and combines them as
-#    K0 + A1 K1 + A1^2 K2 in the loss, so the LSST_A1_1 amplitude never
-#    enters the network; rescnn_nla = nla plus a shared 1D-CNN correction
-#    head on the templates), optimizer (weight_decay),
+#    (name = the architecture, resmlp | rescnn; ia = the factored
+#    intrinsic-alignment design layered on it, omit for plain or `nla` --
+#    the model emits three templates the loss combines as
+#    K0 + A1 K1 + A1^2 K2, so the LSST_A1_1 amplitude never enters the
+#    network; then kwargs: int_dim_res, n_blocks, and for rescnn
+#    kernel_size / channels / n_blocks_cnn / gate_init), optional
+#    trunk_epochs (two-phase schedule) + head (head-phase overrides:
+#    lr_base / loss_mode / trim / focus), optimizer (weight_decay),
 #    lr (lr_base, bs_base, warmup_epochs), scheduler (mode, patience, factor),
 #    trim / focus (robustness schedules).
 #

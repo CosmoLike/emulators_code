@@ -33,7 +33,8 @@ train_args:
   loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
   silent:    false       # false -> per-epoch progress lines
 
-  # Two-phase schedule (rescnn_nla only; omit or 0 = joint training).
+  # Two-phase schedule (name: rescnn + ia: nla only; omit or 0 = joint
+  # training).
   # Phase 1 (epochs 1..trunk_epochs): the conv head is bypassed, so the
   # model trains as pure nla at nla cost per epoch. Phase 2 (the
   # remaining nepochs - trunk_epochs): the trunk freezes at phase 1's
@@ -43,34 +44,55 @@ train_args:
   # trim / focus schedules per phase.
   # trunk_epochs: 1500
 
+  # Head-phase overrides (needs trunk_epochs > 0; error otherwise).
+  # By the handoff the trunk has absorbed most outliers, so the head
+  # pass may want a different objective. Every key is optional and
+  # falls back to the main value; trim / focus are FULL replacement
+  # blocks (same keys as the main ones, incl. kappa -- no merging),
+  # restarting at the head phase's own epoch 1.
+  # head:
+  #   lr_base:   0.001       # phase-2 base lr (same sqrt-batch rule)
+  #   loss_mode: chi2        # e.g. quadratic once outliers are gone
+  #   trim:      {start: 0.0, end: 0.0, hold_epochs: 1,
+  #               anneal_epochs: 1, shape: cosine}   # no trimming
+  #   focus:     {start: 0.0, end: 0.0, hold_epochs: 1,
+  #               anneal_epochs: 1, shape: linear, kappa: 0.15}
+
   model:
-    # `name` picks the network; the other keys are its kwargs.
+    # Two orthogonal choices pick the model class; the other keys are
+    # its kwargs. YAML keeps the LAST occurrence of a duplicated key
+    # silently, so never leave two uncommented copies of one key (a
+    # stray duplicate runs the wrong model with no error). The startup
+    # banner prints the resolved class, so check it.
     #
-    # Choose exactly ONE name. YAML keeps the LAST `name:` key silently,
-    # so do not leave two uncommented (that is why a stray duplicate runs
-    # the wrong model with no error). The startup banner prints the
-    # resolved class, so check it matches what you intended.
+    # `name` = the ARCHITECTURE:
     #
     #   resmlp  Plain residual MLP. The baseline; maps the whitened
     #           parameters straight to the whitened data vector.
     #
-    #   rescnn  ResMLP trunk + a 1-D CNN correction head (uncomment the
-    #           CNN knobs below). For theta-structured residuals.
+    #   rescnn  ResMLP trunk + a 1-D CNN correction head in theta
+    #           order (uncomment the conv-head knobs below). For
+    #           theta-structured residuals.
     #
-    #   nla     Factored intrinsic alignment. The net emits 3 templates
-    #           and the loss combines them in closed form:
+    # `ia` = the factored intrinsic-alignment design layered on the
+    # architecture (OMIT the key for the plain emulator):
+    #
+    #   nla     The net emits 3 templates from the non-amplitude
+    #           inputs and the loss combines them in closed form:
     #             xi = K1 + A1 * K2 + A1^2 * K3
-    #           The amplitude A1 (= LSST_A1_1) never enters the network,
-    #           so the emulator is exact in it and its prior costs zero
-    #           training coverage. LSST_A1_2 (the eta power) stays an input.
+    #           The amplitude A1 (= LSST_A1_1) never enters the
+    #           network, so the emulator is exact in it and its prior
+    #           costs zero training coverage. LSST_A1_2 (the eta
+    #           power) stays an input. With name: rescnn the gated
+    #           conv corrects each template in theta order before the
+    #           combine -- the polynomial is untouched, so the
+    #           correction stays exact in A1.
     #
-    #   rescnn_nla  nla plus rescnn's 1-D CNN correction head: the trunk
-    #           emits the 3 templates and ONE shared gated conv corrects
-    #           each of them in theta order before the loss combines
-    #           them. The amplitude polynomial is untouched, so the
-    #           correction stays exact in A1. Takes the CNN knobs below.
+    #   tatt    Reserved (3 amplitudes, 10 templates) -- errors until
+    #           its training dumps exist.
     #
     name:        resmlp
+    # ia:        nla
     #
     # Trunk kwargs (all models):
     int_dim_res: 128         # residual-block width
@@ -85,24 +107,18 @@ train_args:
     # activation: H
     # n_gates:    3          # gates K for multigate / gated_power
     #
-    # Conv-head knobs (rescnn / rescnn_nla; ignored by the others).
+    # Conv-head knobs (name: rescnn; ignored by resmlp).
     # The head is memory-bandwidth-bound, not FLOP-bound: its s/epoch
-    # cost scales like (3 if fold, 1 if mix) * channels * n_blocks_cnn
-    # (the size of the (rows, channels, n_keep) intermediates the GPU
-    # must move each step), so budget those three together.
+    # cost scales like channels * n_blocks_cnn (the size of the
+    # (rows, channels, n_keep) intermediates the GPU must move each
+    # step), so budget those two together. With ia: nla the conv reads
+    # the 3 templates as its input channels (Conv1d 3->C->3, cross-
+    # template features; A1 exactness is unaffected -- it lives in the
+    # loss combine).
     # kernel_size:  11       # conv kernel width (odd)
     # channels:     16       # conv filters in the 1D-CNN appendix
     # n_blocks_cnn: 1        # stacked CNN correction blocks
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
-    # template_mix: false    # rescnn_nla only. false (default) = one conv
-    #                        # kernel shared identically across the 3
-    #                        # templates (folded into the batch: 3x the
-    #                        # memory traffic). true = the templates are
-    #                        # the conv's input channels (Conv1d 3->C->3):
-    #                        # same FLOPs, 1/3 the traffic, cross-template
-    #                        # features -- drops the shared-kernel
-    #                        # constraint. A1 exactness unaffected either
-    #                        # way (it lives in the loss combine).
     # compile_mode: default  # conv models default to this already because
     #                        # CUDA-graph capture (reduce-overhead) crashed
     #                        # on the gated skip-add (torch <= 2.x, 2026-06).
@@ -111,9 +127,9 @@ train_args:
     #                        # overhead (it either works or crashes in
     #                        # epoch 1).
     #
-    # nla / rescnn_nla need no other kwargs: n_amps and the 3 templates
-    # plus the amplitude column names are set automatically
-    # (experiment.py).
+    # The ia designs need no other kwargs: n_amps and the template
+    # count plus the amplitude column names come from the design
+    # (IA_DESIGNS in experiment.py).
 
   optimizer:             # cls is fixed to AdamW in the script
     weight_decay: 0.0
@@ -122,11 +138,9 @@ train_args:
     lr_base:       0.0025
     bs_base:       64.0
     warmup_epochs: 10
-    # head_lr_base: 0.001  # optional, two-phase runs only: the head
-    #                      # pass's base lr (same sqrt rule). Either way
-    #                      # phase 2 RESTARTS at its base with a fresh
-    #                      # warmup + scheduler -- it never inherits
-    #                      # phase 1's decayed lr.
+    # Two-phase runs: each phase RESTARTS at its base lr with a fresh
+    # warmup + scheduler (never phase 1's decayed lr); a head-specific
+    # base goes in the head: block above, not here.
 
   scheduler:             # cls is fixed to ReduceLROnPlateau
     mode:     min

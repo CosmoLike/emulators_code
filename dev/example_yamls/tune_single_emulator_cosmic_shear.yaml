@@ -1,14 +1,17 @@
 # Config for tune_single_emulator_cosmic_shear.py
 #
-# Same schema as the training YAML, except a train_args leaf may be
-# a SEARCH RANGE instead of a fixed scalar:
+# Same schema as the training YAML, except a NUMERIC train_args leaf may
+# be a SEARCH RANGE instead of a fixed scalar:
 #
 #     knob: value                       # fixed
 #     knob: [default, min, max, kind]   # searched; kind = int|float|log
 #
 # The first value is the DEFAULT (the training driver uses it; this
 # search warm-starts trial 0 from it). Lower nepochs here so each
-# trial is fast.
+# trial is fast. String-valued keys (model.name / model.ia /
+# model.activation / loss_mode / shapes) are FIXED across the study --
+# run one study per choice to compare them. The training YAML's
+# trunk_epochs / head two-phase keys work here too (fixed scalars).
 #
 # The data files below are bare filenames; the driver resolves them under
 # $ROOTDIR/<--root>/chains. cosmolike_data_dir / cosmolike_dataset are
@@ -38,17 +41,26 @@ train_args:
   bs:        256
   loss_mode: sqrt
 
-  model:                 # name picks the class; other keys are its kwargs
-    name:        resmlp                # resmlp | rescnn (fixed across study)
+  model:                 # name + ia pick the class; other keys its kwargs
+    # name = the ARCHITECTURE (resmlp | rescnn); ia = the factored
+    # intrinsic-alignment design layered on it (omit for the plain
+    # emulator; nla). Both fixed across the study -- see the training
+    # YAML's model block for the full description.
+    name:        resmlp
+    # ia:        nla
     int_dim_res: [128, 64, 256, int]   # searched
     n_blocks:    [4, 2, 6, int]        # searched
-    # ResCNN-only knobs (ignored by ResMLP) -- uncomment for rescnn; each
-    # may be a fixed value or a [default, min, max, kind] search range:
+    # activation: H          # H | power | multigate | gated_power (fixed;
+    #                        # the --activation flag overrides)
+    # n_gates:    3          # gates K for multigate / gated_power
+    # Conv-head knobs (name: rescnn; ignored by resmlp) -- each may be a
+    # fixed value or a [default, min, max, kind] search range:
     # kernel_size:  11
     # channels:     16
     # n_blocks_cnn: 1
     # gate_init:    0.1
-    # compile_mode: default            # CUDA: ResCNN may need this
+    # compile_mode: default  # conv models already default to this
+    #                        # (reduce-overhead is worth one retry)
 
   optimizer:
     weight_decay: 0.0

@@ -799,7 +799,7 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                  sched_opts=None, trim_opts=None, focus_opts=None,
                  thresholds=None, gpu_mem_gb=16, use_amp=False,
                  silent=False, device='gpu', seed=0,
-                 trunk_epochs=0):
+                 trunk_epochs=0, head_opts=None):
   """
   One training run; model, optimizer, schedule auto-built.
 
@@ -828,13 +828,10 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                      "lr_base"/"bs_base" -> sqrt-batch rule
                        (lr = lr_base * sqrt(bs / bs_base))
                      "warmup_epochs"     -> linear lr warmup
-                     "head_lr_base"      -> optional: the two-phase
-                       head pass's base lr (same sqrt rule);
-                       absent -> lr_base. Either way each phase
-                       RESTARTS at its base with a fresh warmup +
-                       scheduler, never at the other phase's
-                       decayed lr.
-                   None -> a sensible default.
+                   None -> a sensible default. Each phase of a
+                   two-phase run RESTARTS at its base lr with a
+                   fresh warmup + scheduler, never at the other
+                   phase's decayed lr.
     sched_opts   = scheduler spec dict (see make_scheduler):
                    "cls" + its kwargs (mode, patience, factor,
                    ...). None -> ReduceLROnPlateau, mode "min",
@@ -865,6 +862,19 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                    the zero-init head starts as an exact identity,
                    so the handoff is loss-continuous). 0 (default)
                    = ordinary joint training.
+    head_opts    = optional head-phase overrides (two-phase runs
+                   only; needs trunk_epochs > 0). By the handoff
+                   the trunk has absorbed most outliers, so the
+                   head phase may want a different objective. Keys
+                   (each absent -> the main value is reused):
+                     "lr_base"   -> phase-2 base lr (sqrt rule);
+                     "loss_mode" -> phase-2 loss transform;
+                     "trim"      -> phase-2 trim schedule, a FULL
+                       replacement block (its hold/anneal count
+                       from the phase's own epoch 1);
+                     "focus"     -> phase-2 focus schedule, ditto
+                       (include kappa -- no merge with the main
+                       block).
 
   Returns:
     model        = trained network, restored to the best frac>0.2
@@ -880,6 +890,11 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
     raise ValueError(
       f"trunk_epochs ({trunk_epochs}) must be < nepochs "
       f"({nepochs}): the head needs the remaining epochs")
+  if head_opts and trunk_epochs == 0:
+    raise ValueError(
+      "head-phase overrides (the train_args.head block) need "
+      "trunk_epochs > 0 -- without the two-phase schedule they "
+      "would silently do nothing")
 
   if model_opts is None:
     model_opts = {"cls": ResMLP,
@@ -929,10 +944,10 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
 
   torch.manual_seed(seed)
 
-  # input width = the ENCODED width. For most geometries that equals
-  # the raw parameter count, but a geometry that carries an amplitude
-  # (nla_as: whitened block keeps As AND appends it raw) is wider, and
-  # advertises the true width via encoded_dim.
+  # input width = the ENCODED width, read off the geometry when it
+  # advertises one (encoded_dim); the raw parameter count otherwise.
+  # The geometry owns its output width -- the model should size itself
+  # by that statement, not by re-deriving it from the dump.
   in_dim = getattr(param_geometry, "encoded_dim",
                    train_set["C"].shape[1])
   model = make_model(model_opts=model_opts,
@@ -977,7 +992,7 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
   if trunk_epochs > 0 and not hasattr(model, "set_train_phase"):
     raise ValueError(
       "trunk_epochs needs a two-phase model (one defining "
-      "set_train_phase, e.g. rescnn_nla); this model is "
+      "set_train_phase, e.g. name: rescnn + ia: nla); this model is "
       f"{type(model).__name__}")
 
   if device.type == "cuda":
@@ -1020,16 +1035,33 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
 
     # each pass restarts the lr at its base (never the other phase's
     # decayed floor). The head phase trains a fresh zero-init
-    # subnetwork, so the full base + warmup is the right default; an
-    # optional lr_opts["head_lr_base"] overrides it (same sqrt-batch
-    # rule) when the residual signal wants a cooler start.
-    lr_pass = learning_rate
-    if phase == "head" and "head_lr_base" in lr_opts:
-      lr_pass = (lr_opts["head_lr_base"]
-                 * (bs / lr_opts["bs_base"]) ** 0.5)
+    # subnetwork, so the full base + warmup is the right default --
+    # but by the handoff the trunk has absorbed most outliers, so
+    # head_opts may override the objective for that pass: a cooler
+    # lr_base (same sqrt-batch rule), another loss_mode, and full
+    # replacement trim / focus schedules (each restarts at the
+    # phase's own epoch 1, like the main ones do per pass).
+    lr_pass    = learning_rate
+    mode_pass  = loss_mode
+    trim_pass  = trim_opts
+    focus_pass = focus_opts
+    if phase == "head" and head_opts:
+      if "lr_base" in head_opts:
+        lr_pass = (head_opts["lr_base"]
+                   * (bs / lr_opts["bs_base"]) ** 0.5)
+      mode_pass  = head_opts.get("loss_mode", loss_mode)
+      trim_pass  = head_opts.get("trim", trim_opts)
+      focus_pass = head_opts.get("focus", focus_opts)
     if phase is not None and not silent:
+      over = []
+      if trim_pass is not trim_opts:
+        over.append("trim")
+      if focus_pass is not focus_opts:
+        over.append("focus")
+      tail = f"  [head overrides: {', '.join(over)}]" if over else ""
       print(f"phase '{phase}': {n_pass} epochs, lr restarts "
-            f"at {lr_pass:.2e} (+ {wmupe}-epoch warmup)")
+            f"at {lr_pass:.2e} (+ {wmupe}-epoch warmup), "
+            f"loss_mode {mode_pass}{tail}")
 
     opt   = make_optimizer(model=model,
                            opt_opts=opt_opts,
@@ -1044,12 +1076,12 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                                  model=model,
                                  bs=bs,
                                  lossfn=chi2fn,
-                                 mode=loss_mode,
+                                 mode=mode_pass,
                                  data=data,
                                  thresholds=thresholds,
                                  warmup_epochs=wmupe,
-                                 trim_opts=trim_opts,
-                                 focus_opts=focus_opts,
+                                 trim_opts=trim_pass,
+                                 focus_opts=focus_pass,
                                  use_amp=use_amp,
                                  silent=silent)
     # histories concatenate across phases: one continuous per-epoch

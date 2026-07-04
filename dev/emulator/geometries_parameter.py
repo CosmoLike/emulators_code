@@ -375,7 +375,7 @@ class AmplitudeFactorGeometry:
   [:, -n_amps:].
   """
   def __init__(self, device, pg_keep, amp_idx, n_param,
-               carry_idx=None, names=None):
+               names=None):
     """Store the split fields (the classmethod builds them).
 
     Arguments:
@@ -384,12 +384,6 @@ class AmplitudeFactorGeometry:
       amp_idx   = list of amplitude column indices in the raw
                   parameter vector, in the order the coeff_fn
                   expects (e.g. [a1, a2, b_TA] for TATT).
-      carry_idx = optional subset of amp_idx that is CARRIED:
-                  appended raw for the loss but also kept
-                  (whitened) in the model's input block (e.g. As
-                  in the nla_as design, whose nonlinear dependence
-                  the network must still see). None = every
-                  amplitude is factored out of the input.
       n_param   = total number of raw parameters.
       names     = full raw-order parameter names (the covmat
                   header); the diagnostics read them off the
@@ -405,19 +399,13 @@ class AmplitudeFactorGeometry:
     idx_list = []
     for a in amp_idx:
       idx_list.append(int(a))
-    carry_list = []
-    if carry_idx is not None:
-      for a in carry_idx:
-        carry_list.append(int(a))
     self.n_amps  = len(idx_list)
     # amplitude columns, in coeff_fn order (appended as-is).
     self.amp_idx = torch.tensor(idx_list, dtype=torch.long,
                                 device=device)
-    self.carry_idx = torch.tensor(carry_list, dtype=torch.long,
-                                  device=device)
-    # keep = every column that stays in the whitened input block:
-    # the non-amplitudes plus the carried amplitudes.
-    drop = set(idx_list) - set(carry_list)
+    # keep = every column that stays in the whitened input block
+    # (the non-amplitudes).
+    drop = set(idx_list)
     keep = []
     for j in range(n_param):
       if j not in drop:
@@ -428,14 +416,13 @@ class AmplitudeFactorGeometry:
   @property
   def encoded_dim(self):
     """Width of encode()'s output: the whitened block plus the
-    appended raw amplitudes (differs from n_param when an
-    amplitude is carried, so run_emulator sizes the model by this,
-    not by the raw parameter count)."""
+    appended raw amplitudes (== n_param here; the property is the
+    geometry's own statement of its output width, which
+    run_emulator reads instead of assuming the raw count)."""
     return int(self.keep.numel()) + self.n_amps
 
   @classmethod
-  def from_covmat(cls, device, center, covmat_path, amp_names,
-                  carry_names=None):
+  def from_covmat(cls, device, center, covmat_path, amp_names):
     """Build the input geometry from the parameter covmat.
 
     Reads the covmat header for the column names, drops the
@@ -452,11 +439,7 @@ class AmplitudeFactorGeometry:
                     "#"-prefixed list of column names.
       amp_names   = list of amplitude column names to append for
                     the loss, in coeff_fn order (NLA:
-                    ["LSST_A1_1"]; TATT: the a1/a2/b_TA names;
-                    nla_as: ["As_1e9", "LSST_A1_1"]).
-      carry_names = optional subset of amp_names that also stays
-                    in the whitened input block (see __init__'s
-                    carry_idx); None = all amp_names factored.
+                    ["LSST_A1_1"]; TATT: the a1/a2/b_TA names).
 
     Returns:
       an AmplitudeFactorGeometry whose encode whitens the
@@ -468,12 +451,7 @@ class AmplitudeFactorGeometry:
     amp_idx = []
     for a in amp_names:
       amp_idx.append(names.index(a))
-    carry_idx = []
-    if carry_names is not None:
-      for a in carry_names:
-        carry_idx.append(names.index(a))
-    # drop only the factored amplitudes; carried ones stay whitened.
-    drop = set(amp_idx) - set(carry_idx)
+    drop = set(amp_idx)
 
     keep = []
     for j in range(len(names)):
@@ -492,7 +470,7 @@ class AmplitudeFactorGeometry:
                             cen, V, np.sqrt(lam))
 
     return cls(device=device, pg_keep=pg_keep, amp_idx=amp_idx,
-               n_param=len(names), carry_idx=carry_idx, names=names)
+               n_param=len(names), names=names)
 
   @classmethod
   def from_state(cls, device, state):
@@ -506,7 +484,6 @@ class AmplitudeFactorGeometry:
                                                 state["pg_keep"]),
                amp_idx=state["amp_idx"],
                n_param=state["n_param"],
-               carry_idx=state.get("carry_idx"),
                names=state.get("names"))
 
   def state(self):
@@ -514,12 +491,11 @@ class AmplitudeFactorGeometry:
     kept-column ParamGeometry's own state)."""
     return {"pg_keep": self.pg_keep.state(),
             "amp_idx": self.amp_idx.cpu(),
-            "carry_idx": self.carry_idx.cpu(),
             "n_param": self.n_param,
             "names": self.names}
 
   def encode(self, theta):
-    """Raw parameters -> model input with amplitudes carried.
+    """Raw parameters -> model input with amplitudes appended.
 
     Arguments:
       theta = (B, n_param) raw physical parameters, one row per

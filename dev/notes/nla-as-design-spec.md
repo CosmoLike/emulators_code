@@ -47,6 +47,48 @@ improvement (0.381 -> 0.346), not a zero A1 correlation. Expect the
 same shape for TATT: amplitudes stay in the hardness ranking while
 their prior stops costing coverage.**
 
+**SIMPLIFICATIONS (2026-07-04b, user-driven):** (1) template_mix knob
+DELETED -- templates-as-conv-channels is now THE TemplateResCNN head
+(no fold path; user: "win-win", and the shared-kernel regularization
+only matters at tiny N). Zero-init target is always the mix block's
+collapse conv (the channels==1 Identity edge case is gone). A stale
+`template_mix:` YAML key now raises TypeError (unexpected kwarg).
+(2) head_lr_base REPLACED by a unified train_args.head block of
+head-phase overrides: lr_base / loss_mode / trim / focus (trim+focus
+are FULL replacement blocks incl. kappa, restarting at the head
+phase's epoch 1; rationale: post-handoff there are few outliers, so
+e.g. loss_mode chi2 + no trim). head: without trunk_epochs>0 raises
+(silent-no-op trap). run_emulator signature: trunk_epochs, head_opts.
+
+**CONFIG SCHEME REDESIGN (2026-07-04, user: "this naming is bad").**
+train_args.model.name is now the ARCHITECTURE ONLY (resmlp | rescnn);
+a separate model.ia key layers the factored IA design (absent/None =
+plain; "nla"; "tatt" reserved). MODELS is keyed by (name, ia) tuples;
+IA_DESIGNS = {"nla": {amp_names, coeff_fn, n_templates}} centralizes
+the per-design data (tatt = one new entry when its dumps exist).
+exp.model_name = composed display name ("rescnn_nla") -- run_tag
+FILENAMES ARE UNCHANGED. exp.ia drives the design lookups; direct
+construction infers ia from the factored flag. The old one-key names
+(nla, rescnn_nla) now ERROR with a message teaching the split. YAML
+`ia: none` (string) == absent. build_specs strips "ia" like
+"name"/"activation". ALSO DELETED (same session, user: "I will never
+do a ResMLP in parallel per redshift bin"): ParallelResMLP +
+GroupedLinear/GroupedAffine/GroupedResBlock +
+parallel/activations.py(GroupedActivation); parallel/ keeps ONLY
+ParallelResCNN + GroupedCNNBlock (shared trunk, per-bin conv).
+
+**CODE DELETED (2026-07-04, user: "we know this is a terrible case").**
+Removed: the nla_as registry entry + NLA_AS_AMP_NAMES + wiring branches
+(experiment.py), AsScaledNLAChi2 (IA/loss_functions.py), and the whole
+carry_idx/carry_names mechanism in AmplitudeFactorGeometry (it existed
+only for nla_as; names + encoded_dim + state round-trip KEPT -- they
+serve nla/rescnn_nla and save_emulator; encoded_dim now always ==
+n_param). Do NOT reference nla_as code paths -- only this note's
+physics lesson survives. Old .h5 saves with a stale carry_idx key
+still load: from_state reads only its named keys, so the extra key is
+simply never touched (verified: encode/decode/state round-trip green
+post-removal).
+
 **VERDICT (2026-07-03 run): ABANDONED, code kept.** nla_as frac>0.2 =
 0.1559 (== resmlp 0.1558; nla alone 0.1472), median 0.0464. The Ats
 scaling ERASED the nla gain, and hardness joint R^2 jumped 0.18 -> 0.42:

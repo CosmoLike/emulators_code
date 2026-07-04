@@ -253,12 +253,13 @@ nothing branches on `isinstance`).
 `ResMLP` is the baseline: an input projection, a stack of residual blocks, an
 output projection. `ResCNN` adds a 1D-CNN correction on top of the ResMLP trunk,
 acting in *theta order* so a convolution can exploit smoothness along the angular
-axis. The factored intrinsic-alignment designs emit templates the loss combines
-in closed form, so the IA amplitude never enters the network: `TemplateMLP`
-(`nla`, and `nla_as` which also factors the linear-order A_s) and
-`TemplateResCNN` (`rescnn_nla` = `nla` plus one shared theta-order CNN
-correcting each template). The model is picked in the YAML
-(`train_args.model.name = resmlp | rescnn | nla | nla_as | rescnn_nla`).
+axis. Two orthogonal YAML keys pick the class: `train_args.model.name` is the
+architecture (`resmlp` | `rescnn`), and the separate `train_args.model.ia` key
+layers a factored intrinsic-alignment design on it (omit for the plain
+emulator; `ia: nla` makes the model emit templates the loss combines in closed
+form, so the IA amplitude never enters the network — `TemplateMLP` for
+`resmlp`, `TemplateResCNN` for `rescnn`, whose gated conv corrects each
+template before the combine).
 
 **6. Feed the GPU** (`batching.py`). The staged data may or may not fit in GPU
 memory, so the loaders pick a regime — hold the whole encoded set resident on the
@@ -388,7 +389,7 @@ Each subfolder mirrors the two-file shape (`emulator_designs.py` +
 
 | Folder | What it is |
 |---|---|
-| `parallel/` | A per-bin split: one ResMLP / CNN head per tomographic bin via grouped layers. Underperformed a single ResMLP at low temperature; not yet tested at high T. |
+| `parallel/` | The per-bin CNN head: a grouped conv refines each tomographic bin independently on a shared ResMLP trunk. (The per-bin ResMLP split was tested, lost to a single ResMLP, and was removed.) |
 | `PCE/` | NPCE: a sparse-Legendre polynomial-chaos base plus a neural refiner. |
 | `IA/` | Factored intrinsic alignment: emulate cosmology-only templates and apply the IA-amplitude polynomial in closed form (the amplitudes never enter the network). |
 
@@ -423,8 +424,9 @@ python $D/bakeoff_activation_emulator_cosmic_shear.py \
 The YAML has two blocks: `data` (bare input filenames resolved under
 `--root/chains`, the cut/split, the cosmolike dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, and the `model` /
 `optimizer` / `lr` / `scheduler` / `trim` / `focus` sub-blocks). Pick the model
-with `train_args.model.name` (`resmlp` | `rescnn` | `nla` | `nla_as` |
-`rescnn_nla`). The same YAML drives both
+with `train_args.model.name` (the architecture, `resmlp` | `rescnn`) plus the
+optional `train_args.model.ia` key (the factored IA design, `nla`; omit for
+plain). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
 list is searched. Templates live in `example_yamls/`; copy one into your
 `--fileroot` (e.g. `train_single_emulator_cosmic_shear.yaml`) and edit it.
@@ -730,11 +732,14 @@ Post-training analyses (each returns a dict the plotting reads).
 
 ### `emulator/parallel/` <a name="apx-parallel"></a>
 
-An experimental per-bin variant: one head per tomographic bin via grouped layers. Underperformed a single ResMLP at low temperature; not yet tested at high T.
+The per-bin CNN variant: a shared ResMLP trunk with a grouped conv that
+refines each tomographic bin independently (no smoothing across bin-boundary
+jumps). Only the conv gets a per-bin twin — the per-bin ResMLP split was
+tested, underperformed a single ResMLP at matched parameters (it re-learns the
+shared cosmology map once per bin), and was removed.
 
-- `emulator_designs.py` — `ParallelResMLP`, `ParallelResCNN`.
-- `emulator_designs_building_blocks.py` — `GroupedLinear`, `GroupedAffine`, `GroupedResBlock`, `GroupedCNNBlock`.
-- `activations.py` — `GroupedActivation`.
+- `emulator_designs.py` — `ParallelResCNN`.
+- `emulator_designs_building_blocks.py` — `GroupedCNNBlock`.
 
 ### `emulator/PCE/` <a name="apx-pce"></a>
 

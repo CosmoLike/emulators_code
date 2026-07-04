@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..activations import activation_fcn
-from ..emulator_designs_building_blocks import Affine, ResBlock, CNNBlock
+from ..emulator_designs_building_blocks import Affine, ResBlock
 
 
 class NLATemplateMLP(nn.Module):
@@ -148,18 +148,21 @@ class TemplateMixCNNBlock(nn.Module):
   the conv's channel axis, so one kernel reads all templates at each
   theta and writes a correction for each -- (B, T, K) -> (B, T, K).
 
-  Why it exists: the shared per-template CNNBlock folds the templates
-  into the batch axis, so every intermediate is (T*B, channels, K) --
+  Why templates-as-channels (and not one kernel folded over a T*B
+  batch): folding makes every intermediate (T*B, channels, K) --
   at T=3, bs 768, K=705, channels 16 that is ~100 MB per tensor, and
   the head becomes memory-bandwidth-bound (the GPU spends its time
-  moving those tensors, not computing). Making the templates input
-  CHANNELS keeps the intermediates at (B, channels, K), a 3x traffic
-  cut at identical FLOPs. The trade: the correction is no longer one
-  kernel shared identically across templates -- it mixes them. That
-  is legal for the factored design (the output is still n_templates
-  amplitude-blind templates; exactness in A1 is a property of the
-  combine, not the head) and physically reasonable (GG, GI, II are
-  correlated correlation-function shapes along the same theta axis).
+  moving those tensors, not computing). Channels keep the
+  intermediates at (B, channels, K), a 3x traffic cut at identical
+  FLOPs, and the cross-template features are physically reasonable
+  (GG, GI, II are correlated correlation-function shapes along the
+  same theta axis -- the exact analogue of a conv reading RGB as 3
+  channels). The fold's only virtue was the shared-kernel
+  regularization, which matters at tiny N, not at the >=10^5-sample
+  training sets this package targets. Either way the factored
+  design's A1 exactness is untouched: it is a property of the loss
+  combine, and the head's output is still n_templates
+  amplitude-blind templates.
 
   The mid activation is unconditional here: conv (T->channels) and
   collapse (channels->T) are both linear convs, so without it they
@@ -213,23 +216,15 @@ class TemplateResCNN(nn.Module):
   from the appended raw amplitudes), so the correction inherits the
   factored design's exactness in the amplitudes.
 
-  Why correct per template, not the combined xi: correcting after
+  Why correct the templates, not the combined xi: correcting after
   the combine would need the amplitudes in the network, surrendering
-  the exact generalization the factoring buys. Each template is
-  itself a correlation-function shape along theta (GG, GI, II share
-  the same angular axis and bin layout), so one conv kernel serves
-  all of them -- the templates fold into the batch axis and the
-  shared head is the sample-efficiency move (one theta-kernel
-  learned from 3x the examples).
-
-  template_mix=True swaps that head for TemplateMixCNNBlock: the
-  templates become the conv's channel axis instead of folding into
-  the batch. Same FLOPs, one third the memory traffic (the folded
-  head's (3B, channels, K) intermediates make it bandwidth-bound on
-  a consumer GPU), and cross-template features -- at the cost of the
-  one-shared-kernel inductive bias. Either head leaves the A1
-  exactness untouched: that lives in the loss's combine, and both
-  heads emit amplitude-blind templates.
+  the exact generalization the factoring buys. The head is
+  TemplateMixCNNBlock: the templates are the conv's channel axis
+  (Conv1d T -> channels -> T in theta order), so the correction is
+  cross-template and every intermediate stays (B, channels, K) --
+  see that class for why this beats folding the templates into the
+  batch. The A1 exactness is untouched either way: it lives in the
+  loss's combine, and the head emits amplitude-blind templates.
 
   The basis handling is ResCNN's: templates live in the full
   (cov-eigenbasis) whitening, which scrambles theta, so fixed
@@ -245,7 +240,8 @@ class TemplateResCNN(nn.Module):
   Input layout is TemplateMLP's (last n_amps columns are the raw
   amplitudes, dropped from the trunk input); output is
   (B, n_templates, n_keep), what TemplateFactoredChi2 consumes --
-  so swapping nla -> rescnn_nla changes only the model.
+  so swapping the architecture (name: resmlp -> rescnn at ia: nla)
+  changes only the model.
 
   The head starts as an exact identity (the last block's output
   layer is zero-initialized, and the final activation maps 0 -> 0),
@@ -271,7 +267,7 @@ class TemplateResCNN(nn.Module):
   def __init__(self, input_dim, output_dim, n_amps,
                n_templates, int_dim_res, geom, kernel_size=11,
                channels=16, n_blocks=4, n_blocks_cnn=1,
-               gate_init=0.1, template_mix=False, block_opts=None):
+               gate_init=0.1, block_opts=None):
     """Build the template trunk, the conv head, the buffers.
 
     Arguments:
@@ -294,11 +290,6 @@ class TemplateResCNN(nn.Module):
                      (default 0.1) to start near the pure trunk;
                      not 0 -- a 0 gate strands the CNN with no
                      gradient, so it never learns.
-      template_mix = False (default): one CNNBlock stack shared
-                     identically across templates (fold into batch).
-                     True: TemplateMixCNNBlock -- templates are the
-                     conv channels; 3x less memory traffic, cross-
-                     template features, no shared-kernel constraint.
       block_opts   = ResBlock options (None -> {}); its "act" is
                      also handed to the CNN head, so head and trunk
                      share one activation family (falls back to
@@ -322,24 +313,17 @@ class TemplateResCNN(nn.Module):
     layers.append(Affine())
     self.model = nn.Sequential(*layers)
 
-    # conv head, in the chosen mode. Both take the trunk's
-    # activation so head and trunk share one family.
-    #   fold mode (default): one CNNBlock stack applied identically
-    #     to every template (templates fold into the batch axis).
-    #   mix mode: TemplateMixCNNBlock, templates as conv channels.
-    self.template_mix = bool(template_mix)
+    # conv head: template-mixing blocks (templates as conv channels;
+    # see TemplateMixCNNBlock for why). Takes the trunk's activation
+    # so head and trunk share one family.
     cnn_act = block_opts.get("act", activation_fcn)
     cnn = []
     for _ in range(n_blocks_cnn):
-      if self.template_mix:
-        cnn.append(TemplateMixCNNBlock(output_dim,
-                                       n_templates=n_templates,
-                                       kernel_size=kernel_size,
-                                       channels=channels,
-                                       act=cnn_act))
-      else:
-        cnn.append(CNNBlock(output_dim, kernel_size=kernel_size,
-                            channels=channels, act=cnn_act))
+      cnn.append(TemplateMixCNNBlock(output_dim,
+                                     n_templates=n_templates,
+                                     kernel_size=kernel_size,
+                                     channels=channels,
+                                     act=cnn_act))
     self.cnn = nn.ModuleList(cnn)
 
     # one learnable gate per template, (n_templates, 1) so it
@@ -359,14 +343,8 @@ class TemplateResCNN(nn.Module):
     # branch trick. Only the last block is zeroed -- zeroing all
     # would kill every gradient path.
     last = self.cnn[-1]
-    if isinstance(last.collapse, nn.Conv1d):
-      nn.init.zeros_(last.collapse.weight)
-      nn.init.zeros_(last.collapse.bias)
-    else:
-      # channels == 1 fold block: collapse is Identity, so the one
-      # conv is the output layer; zero it instead.
-      nn.init.zeros_(last.conv.weight)
-      nn.init.zeros_(last.conv.bias)
+    nn.init.zeros_(last.collapse.weight)
+    nn.init.zeros_(last.collapse.bias)
 
     # training phase, set by set_train_phase: "joint" (default,
     # everything trains), "trunk" (head frozen AND bypassed -- the
@@ -446,20 +424,10 @@ class TemplateResCNN(nn.Module):
     # so its output is known to be y -- skip the compute entirely.
     if self._phase == "trunk":
       return y
-    if self.template_mix:
-      # templates as conv channels: the basis change broadcasts the
-      # matmul over the leading (B, T) axes, so no fold is needed
-      # and every head intermediate stays (B, channels, n_keep).
-      h = y @ self.W_fd                       # (B, T, n_keep) theta
-      for blk in self.cnn:
-        h = blk(h)                            # cross-template conv
-      return y + self.gate * (h @ self.W_df)
-    # fold templates into the batch axis so the one shared conv
-    # stack corrects all of them: view is free (the trunk output is
-    # contiguous), and CNNBlock sees its usual (rows, n_keep).
-    h = y.view(B * self.n_templates, self.n_keep) @ self.W_fd
+    # templates as conv channels: the basis change broadcasts the
+    # matmul over the leading (B, T) axes, and every head
+    # intermediate stays (B, channels, n_keep).
+    h = y @ self.W_fd                         # (B, T, n_keep) theta
     for blk in self.cnn:
-      h = blk(h)                              # theta-aware correction
-    # back to full-whitened, unfold, per-template gate, add.
-    corr = (h @ self.W_df).view(B, self.n_templates, self.n_keep)
-    return y + self.gate * corr
+      h = blk(h)                              # cross-template conv
+    return y + self.gate * (h @ self.W_df)
