@@ -1105,6 +1105,11 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
   # output projection alone scales with 3*n_keep, dominating the total.
   # The Linears inside ResBlock and the head convs stay
   # counted: interleaved with activations, they ARE the nonlinear map.
+  # A separable head's depthwise+pointwise pair also stays counted --
+  # the pair is itself linear (no activation between), but it is a
+  # cheap factorization of the plain conv it replaces, and the block
+  # activation follows it just the same; its Sequential holds only
+  # Conv1d children, which the walk below correctly ignores.
   if not silent:
     n_total  = 0
     n_linear = 0
