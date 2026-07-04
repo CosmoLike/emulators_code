@@ -902,8 +902,14 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
 
   torch.manual_seed(seed)
 
+  # input width = the ENCODED width. For most geometries that equals
+  # the raw parameter count, but a geometry that carries an amplitude
+  # (nla_as: whitened block keeps As AND appends it raw) is wider, and
+  # advertises the true width via encoded_dim.
+  in_dim = getattr(param_geometry, "encoded_dim",
+                   train_set["C"].shape[1])
   model = make_model(model_opts=model_opts,
-                     input_dim=train_set["C"].shape[1],
+                     input_dim=in_dim,
                      output_dim=out_dim,
                      device=device)
 

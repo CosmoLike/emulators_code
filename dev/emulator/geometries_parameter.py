@@ -374,17 +374,23 @@ class AmplitudeFactorGeometry:
   raw amplitudes]. The model reads [:, :-n_amps]; the loss reads
   [:, -n_amps:].
   """
-  def __init__(self, device, pg_keep, amp_idx, n_param):
+  def __init__(self, device, pg_keep, amp_idx, n_param,
+               carry_idx=None):
     """Store the split fields (the classmethod builds them).
 
     Arguments:
-      device  = device the index tensors live on.
-      pg_keep = ParamGeometry that whitens the non-amplitude
-                parameters.
-      amp_idx = list of amplitude column indices in the raw
-                parameter vector, in the order the coeff_fn
-                expects (e.g. [a1, a2, b_TA] for TATT).
-      n_param = total number of raw parameters.
+      device    = device the index tensors live on.
+      pg_keep   = ParamGeometry that whitens the kept parameters.
+      amp_idx   = list of amplitude column indices in the raw
+                  parameter vector, in the order the coeff_fn
+                  expects (e.g. [a1, a2, b_TA] for TATT).
+      carry_idx = optional subset of amp_idx that is CARRIED:
+                  appended raw for the loss but also kept
+                  (whitened) in the model's input block (e.g. As
+                  in the nla_as design, whose nonlinear dependence
+                  the network must still see). None = every
+                  amplitude is factored out of the input.
+      n_param   = total number of raw parameters.
     """
     self.pg_keep = pg_keep
     self.n_param = n_param
@@ -395,21 +401,37 @@ class AmplitudeFactorGeometry:
     idx_list = []
     for a in amp_idx:
       idx_list.append(int(a))
+    carry_list = []
+    if carry_idx is not None:
+      for a in carry_idx:
+        carry_list.append(int(a))
     self.n_amps  = len(idx_list)
     # amplitude columns, in coeff_fn order (appended as-is).
     self.amp_idx = torch.tensor(idx_list, dtype=torch.long,
                                 device=device)
-    # keep = every non-amplitude column, in original order.
-    amp_set = set(idx_list)
+    self.carry_idx = torch.tensor(carry_list, dtype=torch.long,
+                                  device=device)
+    # keep = every column that stays in the whitened input block:
+    # the non-amplitudes plus the carried amplitudes.
+    drop = set(idx_list) - set(carry_list)
     keep = []
     for j in range(n_param):
-      if j not in amp_set:
+      if j not in drop:
         keep.append(j)
     self.keep = torch.tensor(keep, dtype=torch.long,
                              device=device)
 
+  @property
+  def encoded_dim(self):
+    """Width of encode()'s output: the whitened block plus the
+    appended raw amplitudes (differs from n_param when an
+    amplitude is carried, so run_emulator sizes the model by this,
+    not by the raw parameter count)."""
+    return int(self.keep.numel()) + self.n_amps
+
   @classmethod
-  def from_covmat(cls, device, center, covmat_path, amp_names):
+  def from_covmat(cls, device, center, covmat_path, amp_names,
+                  carry_names=None):
     """Build the input geometry from the parameter covmat.
 
     Reads the covmat header for the column names, drops the
@@ -424,9 +446,13 @@ class AmplitudeFactorGeometry:
                     whitening.
       covmat_path = path to the covmat file; first line is a
                     "#"-prefixed list of column names.
-      amp_names   = list of amplitude column names to factor
-                    out, in coeff_fn order (NLA: ["LSST_A1_1"];
-                    TATT: the a1/a2/b_TA names).
+      amp_names   = list of amplitude column names to append for
+                    the loss, in coeff_fn order (NLA:
+                    ["LSST_A1_1"]; TATT: the a1/a2/b_TA names;
+                    nla_as: ["As_1e9", "LSST_A1_1"]).
+      carry_names = optional subset of amp_names that also stays
+                    in the whitened input block (see __init__'s
+                    carry_idx); None = all amp_names factored.
 
     Returns:
       an AmplitudeFactorGeometry whose encode whitens the
@@ -438,11 +464,16 @@ class AmplitudeFactorGeometry:
     amp_idx = []
     for a in amp_names:
       amp_idx.append(names.index(a))
-    amp_set = set(amp_idx)
+    carry_idx = []
+    if carry_names is not None:
+      for a in carry_names:
+        carry_idx.append(names.index(a))
+    # drop only the factored amplitudes; carried ones stay whitened.
+    drop = set(amp_idx) - set(carry_idx)
 
     keep = []
     for j in range(len(names)):
-      if j not in amp_set:
+      if j not in drop:
         keep.append(j)
     cov_k   = cov[np.ix_(keep, keep)]
     cen     = (center.detach().cpu().numpy()
@@ -456,7 +487,8 @@ class AmplitudeFactorGeometry:
     pg_keep = ParamGeometry(device, kept_names,
                             cen, V, np.sqrt(lam))
 
-    return cls(device=device, pg_keep=pg_keep, amp_idx=amp_idx, n_param=len(names))
+    return cls(device=device, pg_keep=pg_keep, amp_idx=amp_idx,
+               n_param=len(names), carry_idx=carry_idx)
 
   @classmethod
   def from_state(cls, device, state):
@@ -469,13 +501,15 @@ class AmplitudeFactorGeometry:
                pg_keep=ParamGeometry.from_state(device,
                                                 state["pg_keep"]),
                amp_idx=state["amp_idx"],
-               n_param=state["n_param"])
+               n_param=state["n_param"],
+               carry_idx=state.get("carry_idx"))
 
   def state(self):
     """Tensors to save; keys match __init__ (pg_keep nests the
     kept-column ParamGeometry's own state)."""
     return {"pg_keep": self.pg_keep.state(),
             "amp_idx": self.amp_idx.cpu(),
+            "carry_idx": self.carry_idx.cpu(),
             "n_param": self.n_param}
 
   def encode(self, theta):

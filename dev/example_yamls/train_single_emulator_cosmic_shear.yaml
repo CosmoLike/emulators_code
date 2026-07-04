@@ -34,9 +34,12 @@ train_args:
   silent:    false       # false -> per-epoch progress lines
 
   model:                 # name picks the class; other keys are its kwargs
-    name:        resmlp    # resmlp | rescnn | nla (factored IA: the net
-                           # emits 3 templates, xi = K0 + A1 K1 + A1^2 K2,
-                           # A1 = LSST_A1_1 never enters the network)
+    name:        resmlp    # resmlp | rescnn | nla | nla_as. nla = factored
+                           # IA (3 templates, xi = K0 + A1 K1 + A1^2 K2;
+                           # A1 = LSST_A1_1 never enters the network).
+                           # nla_as also factors the linear-order As:
+                           # xi = Ats (K1 + A1 K2 + A1^2 K3), Ats = As/mean,
+                           # center scaled per sample; As stays an input.
     int_dim_res: 128
     n_blocks:    4
     # ResCNN-only knobs (ignored by ResMLP) -- uncomment for rescnn:

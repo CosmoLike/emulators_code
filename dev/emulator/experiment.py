@@ -34,7 +34,8 @@ from .geometries_parameter import ParamGeometry, AmplitudeFactorGeometry
 from .loss_functions import make_chi2
 from .emulator_designs import ResMLP, ResCNN
 from .IA.emulator_designs import TemplateMLP
-from .IA.loss_functions import TemplateFactoredChi2, nla_coeffs
+from .IA.loss_functions import (TemplateFactoredChi2, nla_coeffs,
+                                AsScaledNLAChi2)
 from .activations import make_activation
 from .training import (
   run_emulator, build_run_specs, pick_device, make_logger,
@@ -49,7 +50,8 @@ from .training import (
 # as K0 + A1*K1 + A1^2*K2, so the amplitude never enters the network
 # (exact generalization in A1; build_geometry swaps the input geometry
 # and the loss together).
-MODELS = {"resmlp": ResMLP, "rescnn": ResCNN, "nla": TemplateMLP}
+MODELS = {"resmlp": ResMLP, "rescnn": ResCNN, "nla": TemplateMLP,
+          "nla_as": TemplateMLP}
 
 # the amplitude column the NLA design factors out of the network input.
 # LSST_A1_1 is the NLA amplitude (enters xi as a linear field
@@ -57,6 +59,11 @@ MODELS = {"resmlp": ResMLP, "rescnn": ResCNN, "nla": TemplateMLP}
 # evolution power eta, which sits inside the projection integral and
 # stays an emulated input.
 NLA_AMP_NAMES = ["LSST_A1_1"]
+
+# nla_as additionally factors the linear-order As amplitude: appended
+# order [As, A1] (what AsScaledNLAChi2 reads); As is CARRIED (it stays a
+# whitened input too, since halofit makes the dv nonlinear in As).
+NLA_AS_AMP_NAMES = ["As_1e9", "LSST_A1_1"]
 
 # default reported delta-chi2 cutoffs; the first (0.2) is the emulator goal
 # and the best-model-selection metric.
@@ -163,6 +170,9 @@ class EmulatorExperiment:
     self.data       = data
     self.train_args = train_args
     self.model_cls  = model_cls
+    # the registry name ("nla" vs "nla_as" share a class); from_config
+    # overwrites this fallback with the YAML's train_args.model.name.
+    self.model_name = model_cls.__name__.lower()
     self.opt_cls    = opt_cls
     self.sched_cls  = sched_cls
     self.probe      = probe
@@ -239,9 +249,13 @@ class EmulatorExperiment:
       raise ValueError(
         f"unknown train_args.model.name {name!r}; "
         f"choose one of {sorted(models)}")
-    return cls(data=cfg["data"], train_args=ta,
-               model_cls=models[name],
-               raw_train_args=cfg["train_args"], **kwargs)
+    exp = cls(data=cfg["data"], train_args=ta,
+              model_cls=models[name],
+              raw_train_args=cfg["train_args"], **kwargs)
+    # keep the registry NAME too: "nla" and "nla_as" share TemplateMLP,
+    # so the class alone cannot tell the two designs apart.
+    exp.model_name = name
+    return exp
 
   @classmethod
   def from_yaml(cls, path, models=None, **kwargs):
@@ -396,13 +410,22 @@ class EmulatorExperiment:
     if self.model_cls is TemplateMLP:
       if self.rescale != "none":
         raise ValueError(
-          "model 'nla' does not compose with --rescale (the factored "
-          "loss owns the target construction)")
+          "model 'nla'/'nla_as' does not compose with --rescale (the "
+          "factored loss owns the target construction)")
+      # nla_as appends [As, A1] and CARRIES As (it stays whitened in
+      # the input block); nla appends only A1, fully factored.
+      if self.model_name == "nla_as":
+        amp_names   = NLA_AS_AMP_NAMES
+        carry_names = [NLA_AS_AMP_NAMES[0]]
+      else:
+        amp_names   = NLA_AMP_NAMES
+        carry_names = None
       self.pgeom = AmplitudeFactorGeometry.from_covmat(
         device=self.device,
         center=train_set["C_mean"],
         covmat_path=d["train_covmat"],
-        amp_names=NLA_AMP_NAMES)
+        amp_names=amp_names,
+        carry_names=carry_names)
     else:
       # ParamGeometry.from_covmat (geometries_parameter.py): eigendecompose
       # the parameter covmat so encode() centers, rotates, unit-scales the
@@ -427,9 +450,17 @@ class EmulatorExperiment:
     # reading each sample's own A1 off the encoded input's last column,
     # then scores the plain chi2 on the combined xi.
     if self.model_cls is TemplateMLP:
-      self.chi2fn = TemplateFactoredChi2(geom=self.geom,
-                                         coeff_fn=nla_coeffs,
-                                         n_amps=len(NLA_AMP_NAMES))
+      if self.model_name == "nla_as":
+        # as_ref = training-mean As (the C_mean entry of the As
+        # column), the O(1) normalization of the Ats coefficient.
+        i_as = self.names.index(NLA_AS_AMP_NAMES[0])
+        self.chi2fn = AsScaledNLAChi2(
+          geom=self.geom,
+          as_ref=float(np.asarray(train_set["C_mean"])[i_as]))
+      else:
+        self.chi2fn = TemplateFactoredChi2(geom=self.geom,
+                                           coeff_fn=nla_coeffs,
+                                           n_amps=len(NLA_AMP_NAMES))
       return self.pgeom, self.geom, self.chi2fn
 
     # make_chi2 (loss_functions.py): wrap geom in the loss -- plain
@@ -504,7 +535,9 @@ class EmulatorExperiment:
     # (dropped from the trunk input) and how many templates to emit (3
     # for NLA: GG, GI, II). setdefault keeps YAML-set overrides.
     if self.model_cls is TemplateMLP:
-      specs["model_opts"].setdefault("n_amps", len(NLA_AMP_NAMES))
+      n_amps = (len(NLA_AS_AMP_NAMES) if self.model_name == "nla_as"
+                else len(NLA_AMP_NAMES))
+      specs["model_opts"].setdefault("n_amps", n_amps)
       specs["model_opts"].setdefault("n_templates", 3)
 
     return specs

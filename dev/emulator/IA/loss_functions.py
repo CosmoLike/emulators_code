@@ -309,3 +309,83 @@ class TemplateFactoredChi2(CosmolikeChi2):
     self._params = params_whitened
     return CosmolikeChi2.loss(self, pred, target,
                               *args, **kwargs)
+
+
+class AsScaledNLAChi2(TemplateFactoredChi2):
+  """NLA factoring with the linear-order As amplitude factored too.
+
+  The Limber C_ell is exactly proportional to As at linear order, so
+  the combination scales every template by Ats = As / as_ref:
+
+    xi = Ats * (K1 + A1 * K2 + A1^2 * K3)
+
+  with as_ref the training-mean As (an invisible constant the
+  templates absorb, kept so coefficients and outputs stay O(1)).
+  There is NO constant-coefficient template; instead the training
+  center is scaled per sample in encode/decode,
+
+    target = whiten(squeeze(dv) - Ats * center)
+
+  so dividing the matching condition by Ats leaves the templates
+  representing w(dv)/Ats - w(center): pure proportionality, O(1)
+  targets near Ats = 1, and the offset still cancels in the chi2
+  residual. As is CARRIED, not factored, by the input geometry
+  (halofit makes the dv nonlinear in As, so the network must still
+  see it whitened); the appended raw columns are [As, A1], read
+  here as the last two of params_whitened.
+
+  needs_params = True (encode/decode/chi2/loss read [As, A1]).
+  """
+  needs_params = True
+
+  def __init__(self, geom, as_ref):
+    """Hold the geometry and the As reference.
+
+    Arguments:
+      geom   = DataVectorGeometry for the probe.
+      as_ref = training-mean As (same units as the dump column),
+               the normalization making Ats O(1).
+    """
+    super().__init__(geom=geom, coeff_fn=self._coeffs, n_amps=2)
+    self.as_ref = float(as_ref)
+
+  def _ats(self, params_whitened):
+    """(B, 1) Ats = As / as_ref, read from the appended columns
+    (order [As, A1], so As is column -2)."""
+    return params_whitened[:, -2:-1] / self.as_ref
+
+  def _coeffs(self, amps):
+    """(B, 2) [As, A1] -> (B, 3) [Ats, Ats*A1, Ats*A1^2]."""
+    ats = amps[:, 0:1] / self.as_ref
+    a1  = amps[:, 1:2]
+    return torch.cat([ats, ats * a1, ats * a1 * a1], dim=1)
+
+  def encode(self, dv, params_whitened):
+    """Raw dv -> whitened target with the Ats-scaled center.
+
+    Arguments:
+      dv              = (B, total_size) raw data vectors.
+      params_whitened = (B, encoded_dim) encoded params; last two
+                        columns are the raw [As, A1].
+
+    Returns:
+      (B, n_keep) whitened targets the combination must match.
+    """
+    g   = self.geom
+    ats = self._ats(params_whitened)
+    return g.whiten(g.squeeze(dv) - ats * g.center)
+
+  def decode(self, pred, params_whitened):
+    """Templates -> physical xi (for the per-element diagnostics).
+
+    Arguments:
+      pred            = (B, 3, n_keep) whitened templates.
+      params_whitened = (B, encoded_dim) encoded params.
+
+    Returns:
+      (B, n_keep) physical xi on the kept entries.
+    """
+    g   = self.geom
+    ats = self._ats(params_whitened)
+    w   = self._combine(pred, params_whitened)
+    return g.unwhiten(w) + ats * g.center
