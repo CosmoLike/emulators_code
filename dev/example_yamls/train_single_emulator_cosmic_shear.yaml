@@ -80,9 +80,13 @@ train_args:
     # channels:     16       # conv filters in the 1D-CNN appendix
     # n_blocks_cnn: 1        # stacked CNN correction blocks
     # gate_init:    0.1      # initial correction-gate scale (small, not 0)
-    # compile_mode: default  # conv models default to this already (CUDA
-    #                        # graphs trip on the gated skip-add); set it
-    #                        # only to override.
+    # compile_mode: default  # conv models default to this already because
+    #                        # CUDA-graph capture (reduce-overhead) crashed
+    #                        # on the gated skip-add (torch <= 2.x, 2026-06).
+    #                        # reduce-overhead is worth ONE retry on a newer
+    #                        # torch: graphs remove the per-kernel launch
+    #                        # overhead that dominates s/epoch here (it
+    #                        # either works or crashes in epoch 1).
     #
     # nla / rescnn_nla need no other kwargs: n_amps and the 3 templates
     # plus the amplitude column names are set automatically

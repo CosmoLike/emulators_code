@@ -23,11 +23,13 @@ import time
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
 
 from .batching import build_loaders
 from .emulator_designs import ResMLP
+from .emulator_designs_building_blocks import Affine
 from .loss_functions import anneal_value
 
 
@@ -912,6 +914,36 @@ def run_emulator(train_set, val_set, chi2fn, param_geometry,
                      input_dim=in_dim,
                      output_dim=out_dim,
                      device=device)
+
+  # trainable-parameter counts, for comparing model capacity across runs.
+  # .parameters() reaches through a torch.compile wrapper (it delegates to
+  # the wrapped module), so this is the real count either way; requires_grad
+  # filters out the frozen basis buffers (registered as buffers, not
+  # parameters, so they never appear here anyway).
+  #
+  # The second number excludes the pure linear transformations: a Linear
+  # or Affine sitting DIRECTLY in a Sequential composition (the input
+  # projection, the output projection, the final Affine) is an affine map
+  # with no nonlinearity of its own -- it adds width, not shape, and the
+  # output projection alone scales with 3*n_keep, dominating the total.
+  # The Linears inside ResBlock and the convs inside CNNBlock stay
+  # counted: interleaved with activations, they ARE the nonlinear map.
+  if not silent:
+    n_total  = 0
+    n_linear = 0
+    for p in model.parameters():
+      if p.requires_grad:
+        n_total += p.numel()
+    for mod in model.modules():
+      if isinstance(mod, nn.Sequential):
+        # a Sequential iterates over its direct children in order.
+        for child in mod:
+          if isinstance(child, (nn.Linear, Affine)):
+            for p in child.parameters():
+              n_linear += p.numel()
+    print(f"trainable parameters: {n_total:,} "
+          f"({n_total - n_linear:,} excluding pure linear "
+          f"transformations)")
 
   opt = make_optimizer(model=model,
                        opt_opts=opt_opts,
