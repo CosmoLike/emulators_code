@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(echo \"=== claude_skills dir ===\" && ls -la /Users/vivianmiranda/data/claude_skills/pytorch-teaching-style/ 2>/dev/null; echo \"=== find SKILL.md ===\" && find /Users/vivianmiranda/data/claude_skills -iname \"skill.md\" 2>/dev/null; echo \"=== notes folder in cwd ===\" && ls -la /Users/vivianmiranda/data/COCOA/june2026/emulators_code/dev/notes/ 2>/dev/null)"
-    ]
-  }
-}
