@@ -5,6 +5,5 @@
 .broadcast.py.swp
 .DS_Store
 *.pyc
-.DS_Store
 ./driver/.DS_Store
 ./emulator/.DS_Store
