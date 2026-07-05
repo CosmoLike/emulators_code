@@ -10,6 +10,32 @@ disk memmap) and reports the bytes it made resident. build_loaders runs it
 per source (train, then val against the reduced budget) and returns the
 data dict the loop consumes.
 
+The regime ladder, per source:
+
+    dv rows (disk memmap or RAM)      raw params C
+       │                                 │  param_geometry.encode
+       │                                 ▼
+       │                              C_used (n_used, Ncosmo)
+       │                              resident on the GPU
+       │
+       │  enc_dvs + resident < 0.8 * budget ?
+       │
+       ├─ yes -> regime 1 (resident): encode every target once
+       │         (chunked), hold (n_used, tgt_dim) on the GPU;
+       │         load_dv(rows) is a pure index, no per-epoch I/O.
+       ├─ no, dv is a RAM ndarray -> regime 2 (RAM stream):
+       │         chunks RAM -> GPU each epoch, encoded on the
+       │         fly (pinned host memory on CUDA).
+       └─ no, dv is a disk memmap -> regime 3 (disk stream):
+                 the same chunk path, reads hit the disk.
+
+    (legend: n_used = distinct rows this source loads; Ncosmo =
+     parameter count; enc_dvs = bytes of the encoded target set;
+     resident = model + Cinv + encoded params, bytes pinned on
+     the GPU for the whole run; tgt_dim = target width, out_dim
+     unless the loss stages a wider one via target_dim; budget =
+     the VRAM bytes this source may plan against.)
+
 PS: a loader is a closure load(rows) -> tensor mapping global row indices
 to a ready-to-train batch on the compute device. It hides where the data
 lives (resident on the GPU, streamed from RAM, or read from a disk
@@ -28,11 +54,26 @@ import torch
 
 
 def compute_batch_size_bytes(model, bs, sample_dims, dv_len=3000):
-  # sample_dims = shape of one model input (no batch axis): the
-  # cosmo param vector (Ncosmo,); the dv is the model output.
-  # dv_len = full dv length the chi2 un-squeezes to (~3000
-  # conservative, no cosmolike query needed).
+  """
+  Estimate the GPU bytes one training batch costs.
 
+  Measures the autograd-saved activations of a real forward pass
+  (a spy pair of saved-tensor hooks, see the body) and adds the
+  batch input/output buffers and the chi2's per-batch float64
+  scratch. Only shapes matter, so the probe runs on zeros.
+
+  Arguments:
+    model       = the network; probed with one dummy forward.
+    bs          = minibatch size the estimate is for.
+    sample_dims = shape of one model input, no batch axis (the
+                  cosmo param vector: (Ncosmo,)).
+    dv_len      = full dv length the chi2 un-squeezes to (~3000
+                  is conservative; avoids a cosmolike query).
+
+  Returns:
+    estimated bytes per batch (saved activations + I/O buffers +
+    chi2 scratch).
+  """
   # model.parameters() iterates the weight tensors; next() grabs
   # the first. Its .device is where it lives; put x there too.
   dev = next(model.parameters()).device
@@ -90,17 +131,27 @@ def compute_batch_size_bytes(model, bs, sample_dims, dv_len=3000):
 
 
 def compute_model_size_bytes(model):
-  # Memory resident for the whole run: weights, grads, and the
-  # optimizer's per-param state.
-  #
-  # opt_state = state tensors the optimizer keeps per param
-  # (each param-sized):
-  #   SGD (plain)                 0
-  #   SGD+momentum, Adagrad,      1
-  #     RMSprop (default)
-  #   Adam, AdamW, Adamax, NAdam  2
-  #   Adam(amsgrad), RMSprop      3   <- worst typical
-  #     (centered + momentum)
+  """
+  Bytes the model keeps resident for the whole run.
+
+  Counts weights, gradients, and the optimizer's per-parameter
+  state, budgeted at the worst typical case. opt_state = state
+  tensors the optimizer keeps per param (each param-sized):
+
+      SGD (plain)                    0
+      SGD+momentum, Adagrad,         1
+        RMSprop (default)
+      Adam, AdamW, Adamax, NAdam     2
+      Adam(amsgrad), RMSprop         3   <- worst typical
+        (centered + momentum)
+
+  Arguments:
+    model = the network whose parameters are counted.
+
+  Returns:
+    bytes = n_params * element_size * (2 + opt_state), i.e.
+    weights(1) + grads(1) + opt_state buffers.
+  """
   opt_state = 3
   # total parameter elements across all weight tensors.
   p = 0
@@ -110,16 +161,31 @@ def compute_model_size_bytes(model):
   # weights(1) + grads(1) + opt_state buffers
   return p * esize * (2 + opt_state)
 
-def batches_per_load(model, 
-                     bs, 
-                     sample_shape, 
+def batches_per_load(model,
+                     bs,
+                     sample_shape,
                      budget,
                      dv_len=3000):
-  # rows per streamed chunk whose per-batch activation cost fits
-  # within `budget`. resident = model (weights + grads +
-  # optimizer state) + the chi2 precision matrix Cinv; the chunk
-  # gets the rest. budget is explicit (real free VRAM in
-  # research, emulated GPU_MEM in class).
+  """
+  Batches per streamed chunk that fit the VRAM budget.
+
+  resident = model (weights + grads + optimizer state) + the
+  chi2 precision matrix Cinv; the chunk gets what is left of
+  0.8 * budget, divided by one batch's cost.
+
+  Arguments:
+    model        = the network (sizes the resident + probe cost).
+    bs           = minibatch size.
+    sample_shape = shape of one model input, no batch axis.
+    budget       = VRAM bytes to plan against; explicit (real
+                   free VRAM in research, emulated GPU_MEM in
+                   class).
+    dv_len       = full dv length (sizes Cinv and the chi2
+                   scratch).
+
+  Returns:
+    number of bs-row batches per streamed chunk (at least 1).
+  """
   cinv     = dv_len * dv_len * 8
   resident = compute_model_size_bytes(model) + cinv
   free = 0.8 * budget - resident

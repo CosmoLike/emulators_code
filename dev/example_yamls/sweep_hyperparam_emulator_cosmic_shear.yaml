@@ -1,0 +1,163 @@
+# Config for sweep_hyperparam_emulator_cosmic_shear.py
+#
+# Same schema as train_single_emulator_cosmic_shear.yaml (data +
+# train_args; see that file for the full per-key documentation) plus
+# the `sweep` block below, which only this driver reads. The sweep
+# trains one full model per listed value -- everything else held at
+# the train_args defaults -- and writes <--out>.txt (a value/frac
+# table) + <--out>.pdf (the sweep curve) under --fileroot.
+#
+#     python sweep_hyperparam_emulator_cosmic_shear.py \
+#       --root projects/lsst_y1/ \
+#       --fileroot emulators/training_scripts/ \
+#       --yaml sweep_hyperparam_emulator_cosmic_shear.yaml \
+#       --out lrsweep
+#
+# Multi-GPU: values split round-robin, one worker process per visible
+# CUDA device (cap with --n-gpus). Add --gpu-pack on a large card
+# (H200) to co-locate up to 4 small trainings per GPU; leave it off
+# on a 12 GB card. See README section "Multi-GPU execution".
+
+# --- the swept knob (this driver only; other drivers ignore it) ---
+#
+# parameter = the dotted path of exactly ONE train_args leaf.
+# values    = the list to try, one training per entry (numbers,
+#             strings, or booleans).
+#
+# Rules the driver enforces:
+#   - model.name / model.ia are refused: they change the model CLASS,
+#     so comparing architectures is one sweep per architecture (or
+#     the activation bake-off driver), then overlay the tables.
+#   - a path whose first segment is not a train_args key is refused
+#     (a typo would otherwise silently train the same config N times).
+#   - model.activation (or model.activation.type) is the special
+#     case: it sweeps the activation FAMILY (values H | power |
+#     multigate | gated_power) by setting it on the experiment;
+#     leave the --activation flag unset for that sweep.
+#   - a missing intermediate block is created (head.lr_base works
+#     with no head: block in train_args), but guards still apply
+#     (trunk/head overrides need trunk_epochs > 0).
+
+sweep:
+  parameter: lr.lr_base
+  values:
+    - 0.0010
+    - 0.0025
+    - 0.0063
+    - 0.0160
+
+# Other sweeps, ready to swap in (exactly ONE sweep block active;
+# remember YAML silently keeps the LAST duplicated key):
+#
+# sweep:                       # batch size (the lr auto-scales as
+#   parameter: bs              # lr_base * sqrt(bs / bs_base), so this
+#   values:                    # sweeps the coupled pair the loop
+#     - 128                    # actually uses)
+#     - 256
+#     - 512
+#     - 1024
+#
+# sweep:                       # activation family (special case; no
+#   parameter: model.activation             # --activation flag)
+#   values:
+#     - H
+#     - power
+#     - multigate
+#     - gated_power
+#
+# sweep:                       # FiLM on/off on the conv head
+#   parameter: model.cnn.film  # (booleans plot as labeled markers)
+#   values:
+#     - false
+#     - true
+#
+# sweep:                       # conv-head depth (pairs well with
+#   parameter: model.cnn.n_blocks           # rescale_kernel: true)
+#   values:
+#     - 1
+#     - 2
+#     - 3
+#     - 5
+#
+# sweep:                       # head-phase base lr (two-phase runs;
+#   parameter: head.lr_base    # needs trunk_epochs > 0)
+#   values:
+#     - 0.0005
+#     - 0.0010
+#     - 0.0020
+
+data:
+  train_dv:     w0wa_takahashi_dvs_train_cs_16.npy
+  train_params: w0wa_takahashi_params_train_cs_16.1.txt
+  train_covmat: w0wa_takahashi_params_train_cs_16.covmat
+  val_dv:       w0wa_takahashi_dvs_train_cs_8.npy
+  val_params:   w0wa_takahashi_params_train_cs_8.1.txt
+
+  cosmolike_data_dir: lsst_y1
+  cosmolike_dataset:  lsst_y1_M1_GGL0.05.dataset
+
+  omegabh2_cut:  0.035
+  omegabh2_lo:   0.014
+  omegam2h2_lo:  0.015
+  omegam2h2_hi:  0.08
+  train_divisor: 10      # fixed N_train for every sweep point (the
+                         # N_train axis is sweep_ntrain's job)
+  val_divisor:   50
+  split_seed:    0
+  ram_frac:      0.7     # parallel workers stream instead (set to 0
+                         # by the driver, shared dump memmap)
+
+# The baseline every sweep point starts from; the sweep overrides ONE
+# leaf per value. Full per-key documentation (two-phase schedule,
+# clip / rewind guards, every model sub-block knob) lives in
+# train_single_emulator_cosmic_shear.yaml -- this file keeps only the
+# active keys.
+train_args:
+  nepochs:   1600
+  bs:        256
+  loss_mode: sqrt        # sqrt | chi2 | sqrt_dchi2
+  silent:    false
+
+  model:
+    name:        resmlp  # resmlp | rescnn | restrf
+    # ia:        nla     # factored IA design (omit for plain)
+    mlp:
+      width:    128
+      n_blocks: 4
+    # cnn:               # rescnn head knobs -- see the train YAML
+    #   kernel_size: 11
+    #   n_blocks:    1
+    #   gate_init:   0.1
+    # trf:               # restrf head knobs -- see the train YAML
+    #   n_heads:      2
+    #   n_blocks:     1
+    #   n_mlp_blocks: 2
+    #   gate_init:    0.1
+
+  optimizer:
+    weight_decay: 0.0
+
+  lr:
+    lr_base:       0.0025
+    bs_base:       64.0
+    warmup_epochs: 10
+
+  scheduler:
+    mode:     min
+    patience: 25
+    factor:   0.8
+
+  trim:
+    start:         0.1
+    end:           0.025
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         cosine
+
+  focus:
+    start:         0.0
+    end:           2.0
+    hold_epochs:   50
+    anneal_epochs: 300
+    shape:         linear
+    kappa:         0.15

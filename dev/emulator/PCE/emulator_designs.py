@@ -1,4 +1,30 @@
-"""Sparse-Legendre PCE machinery and the PCEEmulator."""
+"""Sparse-Legendre PCE machinery and the PCEEmulator (the NPCE base).
+
+This subpackage holds the polynomial-chaos side of the NPCE (Neural
+PCE) experiment: PCEEmulator, a closed-form sparse-Legendre expansion
+mapping the cosmological parameters to the whitened data vector with
+no network, plus its three fit helpers -- pce_multi_index (the sparse
+candidate basis), pce_design (the normalized-Legendre design matrix),
+and select_lars_loo (greedy term selection with a leave-one-out
+stop). The companion loss_functions.py wraps a frozen PCEEmulator as
+the base under a neural refiner.
+
+Verdict for cosmic-shear xi (2026-06-26, recorded in
+notes/npce-and-ia-template-factoring.md): a PCE base only adds
+capacity, it cannot lower a data-coverage floor, so the NPCE was
+deprioritized. The machinery is kept for reuse and for the build
+lessons baked into the docstrings below: keep the degree low (a
+high-degree Legendre fit Runge-oscillates), gate each mode on its
+leave-one-out error (a wiggly base poisons the refiner), and let the
+refiner backstop everything the gate drops.
+
+PS: PCE = polynomial chaos expansion, a sum of orthogonal
+polynomials of the inputs; LOO = leave-one-out error, the fit's
+generalization error estimated without refitting (the PRESS shortcut
+in select_lars_loo); whitened = transformed to unit-variance
+components (the chi2 metric basis); mode = one SVD direction of the
+centered training targets.
+"""
 
 import itertools
 import numpy as np
@@ -222,12 +248,31 @@ class PCEEmulator(nn.Module):
       mode's term count.
 
   Drop-in model(X) -> whitened dv: X is the pgeom-whitened parameter
-  batch (the input the SGD models see); forward maps it to [-1, 1],
-  evaluates the Legendre design, applies the coefficient matrix for
-  the K amplitudes, and reconstructs the whitened dv from the SVD
-  basis. Build with the from_training classmethod and wrap as the
-  base of an NPCE loss (PCEResidualChi2 = additive, PCERatioChi2 =
-  multiplicative).
+  batch (the input the SGD models see). Build with the from_training
+  classmethod and wrap as the base of an NPCE loss (PCEResidualChi2 =
+  additive, PCERatioChi2 = multiplicative).
+
+  Forward shape flow:
+
+      X  (B, n_dim)              pgeom-whitened parameters
+         │  box map + clamp      2 (X - lo) / (hi - lo) - 1
+         ▼
+      Xm (B, n_dim)              Legendre domain [-1, 1]
+         │  pce_design           products of 1-D Legendre factors
+         ▼
+      Psi (B, n_terms)           the sparse polynomial basis
+         │  @ C                  fitted coefficients, mode by mode
+         ▼
+      Z  (B, K)                  the K mode amplitudes (lambda_i)
+         │  @ Vk^T  + Ybar       SVD reconstruction + ensemble mean
+         ▼
+      out (B, n_keep)            whitened data vector
+
+      (legend: B = batch rows; n_dim = number of cosmological
+       parameters (LSST-Y1 example: 12); n_terms = multi-indices in
+       the sparse candidate basis; K = SVD modes kept by the LOO
+       gate; n_keep = kept data-vector length the network emulates;
+       lo / hi / C / Vk / Ybar = the frozen buffers listed below.)
 
   Buffers (frozen; move with .to(device), never trained):
     lo, hi      = per-parameter [-1, 1] box-map bounds.
@@ -255,6 +300,31 @@ class PCEEmulator(nn.Module):
                     max_terms=30, max_fail=4, silent=False):
     """
     Fit from whitened training inputs/targets.
+
+    Fit pipeline (one pass, no gradient descent):
+
+        X_white (N, n_dim)      Y_white (N, n_keep)
+           │                       │  center on the mean Ybar
+           │  box map to [-1,1]    ▼
+           ▼                    Yc (N, n_keep)
+        Psi (N, n_terms)           │  SVD -> modes Vt, variances S^2
+           │                       ▼
+           │                    z_k = Yc @ Vt[k]  mode amplitudes
+           │                       │
+           └───────────┬───────────┘
+                       │  per mode k: select_lars_loo(Psi, z_k)
+                       ▼
+        keep mode k iff loo < loo_max
+        (stop after max_fail consecutive misses)
+                       │
+                       ▼
+        frozen buffers: lo, hi, multi_index, C, Vk, Ybar
+
+        (legend: N = training rows; n_dim / n_terms / n_keep as in
+         the class docstring; z_k = the k-th SVD amplitude over the
+         training set; loo = relative leave-one-out MSE from
+         select_lars_loo; Vt = the SVD's right singular vectors,
+         row per mode.)
 
     Arguments:
       device   = device the buffers live on.

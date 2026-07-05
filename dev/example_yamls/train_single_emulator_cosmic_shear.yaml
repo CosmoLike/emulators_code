@@ -27,6 +27,25 @@ data:
   split_seed:    0
   ram_frac:      0.7     # RAM fraction stage_source may fill
 
+# Read ONLY by sweep_hyperparam_emulator_cosmic_shear.py (the other
+# drivers ignore this block): sweep exactly one train_args leaf, named
+# by its dotted path, over the listed values (one full training per
+# value at fixed N_train; outputs a value/frac table + figure like the
+# N_train sweep). Any leaf works: bs, lr.lr_base, scheduler.patience,
+# trim.start, model.mlp.width, model.cnn.kernel_size, model.cnn.film
+# (values true/false), head.lr_base, ... Special case: parameter
+# model.activation sweeps the activation family (values H / power /
+# multigate / gated_power; leave --activation unset). model.name and
+# model.ia are refused (they change the model class -- one sweep per
+# architecture).
+#
+# sweep:
+#   parameter: lr.lr_base
+#   values:
+#     - 0.0010
+#     - 0.0025
+#     - 0.0063
+
 train_args:
   nepochs:   1600
   bs:        256

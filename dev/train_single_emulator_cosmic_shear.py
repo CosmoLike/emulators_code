@@ -43,17 +43,23 @@
 #    $ROOTDIR/external_modules/data, not --root).
 #  - `train_args`: knobs (nepochs, bs, loss_mode, silent) plus sub-blocks model
 #    (name = the architecture, resmlp | rescnn | restrf; ia = the factored
-#    intrinsic-alignment design layered on it, omit for plain or `nla` --
+#    intrinsic-alignment design layered on it -- omit for plain; `nla` =
 #    the model emits three templates the loss combines as
 #    K0 + A1 K1 + A1^2 K2, so the LSST_A1_1 amplitude never enters the
-#    network; then one NESTED sub-block per component: mlp {width,
-#    n_blocks} = the trunk; activation {type, n_gates}; cnn {kernel_size,
-#    n_blocks, gate_init} for rescnn (the bins are the conv channels);
-#    trf {n_heads, n_blocks, n_mlp_blocks, shared_mlp, gate_init} for
-#    restrf, whose tokens live at the natural bin width), optional
-#    trunk_epochs (two-phase schedule) + symmetric trunk / head blocks
-#    (per-phase overrides over the shared defaults: lr_base / loss_mode /
-#    trim / focus), optimizer (weight_decay),
+#    network; `tatt` = the same closed-form combine over ten templates
+#    and the three amplitudes LSST_A1_1 / LSST_A2_1 / LSST_BTA_1 (needs
+#    dv dumps holding the ten templates); then one NESTED sub-block per
+#    component: mlp {width, n_blocks} = the trunk; activation {type,
+#    n_gates}; cnn {kernel_size, rescale_kernel, groups, separable,
+#    film, n_blocks, gate_init} for rescnn (the bins are the conv
+#    channels); trf {n_heads, n_blocks, n_mlp_blocks, shared_mlp, film,
+#    gate_init} for restrf, whose tokens live at the natural bin width),
+#    optional trunk_epochs (two-phase schedule) + symmetric trunk / head
+#    blocks (per-phase overrides over the shared defaults: lr_base /
+#    loss_mode / trim / focus / clip / rewind), optional stability
+#    guards clip (per-step gradient-norm ceiling, 0 = off) and rewind
+#    (reload the best weights + optimizer snapshot at every plateau lr
+#    cut), optimizer (weight_decay),
 #    lr (lr_base, bs_base, warmup_epochs), scheduler (mode, patience, factor),
 #    trim / focus (robustness schedules).
 #
@@ -109,7 +115,7 @@
 #
 #- Fixed single-emulator choices -- probe = xi, AdamW, ReduceLROnPlateau,
 #  use_amp = False, reported delta-chi2 thresholds [0.2, 0.5, 1, 10, 100]
-#  (0.2 = goal and model-selection metric), resmlp/rescnn registry -- are
+#  (0.2 = goal and model-selection metric), the (name, ia) MODELS registry -- are
 #  EmulatorExperiment defaults (emulator/experiment.py, which also holds the
 #  setup for a sweep to reuse). The model is the YAML's choice
 #  (train_args.model.name).
@@ -249,29 +255,11 @@ def main():
                                        quiet=args.quiet)
   # the experiment's quiet-gated logger, reused below
   log = exp.log
-  # Announce the full design before anything trains, so a stale YAML is
-  # caught here and not 17 minutes later: the resolved model block (name +
-  # every kwarg), the run knobs, and the physical cuts.
-  ta = exp.train_args
-  d  = cfg["data"]
-  log(f"device: {exp.device}  |  model: {exp.model_cls.__name__}  |  "
-      f"activation: {exp.activation}  |  rescale: {exp.rescale}")
-  log(f"model spec: {ta['model']}")
-  # trunk_epochs > 0 = the two-phase schedule (trunk then frozen-trunk
-  # head); print it only when active, so ordinary runs stay unchanged.
-  tk = ta.get("trunk_epochs", 0)
-  ph = (f"  (two-phase: {tk} trunk + {ta['nepochs'] - tk} head)"
-        if tk else "")
-  log(f"run: nepochs {ta['nepochs']}  bs {ta['bs']}  "
-      f"loss_mode {ta.get('loss_mode', 'sqrt')}{ph}")
-  # the remaining train_args sub-blocks, one dict per line (optimizer /
-  # lr / scheduler / trim / focus), so the whole resolved config is on
-  # the terminal.
-  for block in ("optimizer", "lr", "scheduler", "trim", "focus"):
-    if block in ta:
-      log(f"{block}: {ta[block]}")
-  log(f"cuts: omegabh2 in ({d.get('omegabh2_lo')}, {d['omegabh2_cut']})  "
-      f"omegam2h2 in ({d.get('omegam2h2_lo')}, {d.get('omegam2h2_hi')})")
+  # print_design (experiment.py): the startup banner -- the resolved
+  # model block, run knobs, guards, every train_args sub-block, and the
+  # physical cuts -- so a stale YAML is caught here and not 17 minutes
+  # later. Shared with the sweep / tune drivers.
+  exp.print_design()
   log("loading sources:")
   (model, train_losses, medians,
    means, fracs) = exp.run()

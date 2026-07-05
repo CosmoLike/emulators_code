@@ -18,6 +18,8 @@ bake-off).
 4. [Change X → edit Y](#4-change-x--edit-y)
 5. [Variants](#5-variants)
 6. [Run it](#6-run-it)
+    1. [The `sweep:` block (one-knob sweeps)](#6a-sweep-block)
+    2. [Multi-GPU execution and packing](#6a-multi-gpu)
 7. [Appendix: AI-Usage](#7-appendix-ai-usage)
 8. [Appendix: the chi2 metric (Mahalanobis)](#8-appendix-the-chi2-metric-mahalanobis)
 9. [Appendix: activation functions](#9-appendix-activation-functions)
@@ -59,15 +61,16 @@ emulator/                              the library (pure torch, except geometrie
   batching.py                          memory sizing + regime-aware data loaders
   training.py                          build model/opt/sched, training loop, run_emulator
   experiment.py                        EmulatorExperiment: the whole setup as one object
-  scheduling.py                        lpt_assign: balance a sweep across GPUs
+  scheduling.py                        GPU job balancing + worker pool + VRAM packing
   results.py                           save_learning_curves; save_emulator (.emul + .h5)
   plotting.py                          history / learning-curve / coverage / xi plots
   diagnostics.py                       coverage, local-linear floor, hard-direction fits
   parallel/  PCE/  IA/                 experimental variants (section 5)
 
 train_single_*.py                      CLI: one training run (+ optional diagnostics PDF)
-tune_single_*.py                       CLI: Optuna hyperparameter search
+tune_single_*.py                       CLI: Optuna hyperparameter search (multi-GPU)
 sweep_ntrain_*.py                      CLI: f(dchi2 > thr) vs N_train   (multi-GPU)
+sweep_hyperparam_*.py                  CLI: sweep ONE YAML-chosen knob  (multi-GPU)
 bakeoff_activation_*.py                CLI: one curve per activation    (multi-GPU)
 example_yamls/                         template YAMLs; copy one into a project's --fileroot
 ```
@@ -301,13 +304,15 @@ returns the histories.
 driver is a thin wrapper that varies one knob:
 
 ```
-                    EmulatorExperiment   (steps 1–7)
-                             │
-       ┌─────────────┬───────┴────────┬─────────────────────┐
-       ▼             ▼                ▼                     ▼
-  train_single   tune_single     sweep_ntrain        bakeoff_activation
-   one run      Optuna search    f(dchi2) vs N        one curve per act
-                                 (multi-GPU, LPT)     (multi-GPU, by act)
+                       EmulatorExperiment   (steps 1–7)
+                                │
+     ┌────────────┬─────────────┼───────────────┬──────────────────┐
+     ▼            ▼             ▼               ▼                  ▼
+train_single  tune_single  sweep_ntrain  sweep_hyperparam  bakeoff_activation
+  one run    Optuna search f(dchi2) vs N  one YAML knob      one curve per act
+             (multi-GPU,   (multi-GPU,    (multi-GPU,        (multi-GPU, by act)
+              journal)      LPT, --gpu-    even split,
+                            pack)          --gpu-pack)
 ```
 
 ---
@@ -344,8 +349,8 @@ driver is a thin wrapper that varies one knob:
 | File | Role |
 |---|---|
 | `experiment.py` | `EmulatorExperiment`: config → device → data → geometry → chi2 → spec → train as one reusable object (`from_yaml` / `from_config`). The drivers compose it. |
-| `scheduling.py` | `lpt_assign`: split a sweep's jobs across GPUs by total cost (Longest-Processing-Time). |
-| `results.py` | `save_learning_curves`: `np.loadtxt`-friendly plain-text tables. `save_emulator`: a trained run as `.emul` (weights, cpu state_dict) + `.h5` (whitening geometries, histories, config). |
+| `scheduling.py` | GPU job balancing (`lpt_assign` by cost, `even_assign` round-robin), the spawned worker pool (`run_gpu_pool`: one process per GPU lane, per-GPU job queues), and the `--gpu-pack` VRAM-token machinery (`estimate_train_vram_fraction`, `vram_tokens`). |
+| `results.py` | `save_learning_curves` / `save_sweep_table`: `np.loadtxt`-friendly plain-text tables. `save_emulator`: a trained run as `.emul` (weights, cpu state_dict) + `.h5` (whitening geometries, histories, config). |
 | `plotting.py` | Training history, learning-curve overlays, coverage panels, xi curves. |
 | `diagnostics.py` | Post-training analyses: coverage (kNN distance vs error), the local-linear data floor, the hard-direction regression. |
 
@@ -354,8 +359,9 @@ driver is a thin wrapper that varies one knob:
 | File | Role |
 |---|---|
 | `train_single_emulator_cosmic_shear.py` | One training run; `--diagnostic` writes a multipage PDF. |
-| `tune_single_emulator_cosmic_shear.py` | Optuna study over the YAML's `[default, min, max, kind]` ranges. |
-| `sweep_ntrain_emulator_cosmic_shear.py` | `f(dchi2 > thr)` vs `N_train`; multi-GPU, LPT-balanced. |
+| `tune_single_emulator_cosmic_shear.py` | Optuna study over the YAML's `[default, min, max, kind]` ranges; multi-GPU via a shared journal-file study (`--n-gpus`, `--journal`). |
+| `sweep_ntrain_emulator_cosmic_shear.py` | `f(dchi2 > thr)` vs `N_train`; multi-GPU, LPT-balanced; `--gpu-pack` co-locates small points on big cards. |
+| `sweep_hyperparam_emulator_cosmic_shear.py` | Sweep ONE hyperparameter chosen in the YAML `sweep:` block (any dotted `train_args` path, e.g. `bs`, `lr.lr_base`, `model.cnn.film`, `model.activation`); multi-GPU, `--gpu-pack`. |
 | `bakeoff_activation_emulator_cosmic_shear.py` | One learning curve per activation; multi-GPU, split by activation. |
 
 ---
@@ -416,11 +422,27 @@ python $D/sweep_ntrain_emulator_cosmic_shear.py \
   --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
   --yaml train_single_emulator_cosmic_shear.yaml --n-points 8 --out curve
 
+# one-knob sweep (the knob + values live in the YAML's sweep: block)
+python $D/sweep_hyperparam_emulator_cosmic_shear.py \
+  --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
+  --yaml train_single_emulator_cosmic_shear.yaml --out lrsweep
+
+# Optuna search across all GPUs (one shared study via a journal file)
+python $D/tune_single_emulator_cosmic_shear.py \
+  --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
+  --yaml tune_single_emulator_cosmic_shear.yaml --n-trials 64
+
 # activation bake-off across GPUs
 python $D/bakeoff_activation_emulator_cosmic_shear.py \
   --root projects/lsst_y1/ --fileroot emulators/training_scripts/ \
   --yaml train_single_emulator_cosmic_shear.yaml --out bakeoff
 ```
+
+On a card with far more memory than one training needs (an H200), add
+`--gpu-pack` to either sweep: points estimated at ≤ 20% of the GPU run four
+to a card, ≤ 40% two to a card, bigger ones exclusive (off by default — on a
+12 GB RTX 3060 one training is the card). The details live in
+[Multi-GPU execution and packing](#6a-multi-gpu) below.
 
 The YAML has two blocks: `data` (bare input filenames resolved under
 `--root/chains`, the cut/split, the cosmolike dataset) and `train_args` (`nepochs`, `bs`, `loss_mode`, the `model` /
@@ -433,8 +455,95 @@ with `train_args.model.name` (the architecture, `resmlp` | `rescnn` | `restrf`) 
 optional `train_args.model.ia` key (the factored IA design, `nla` | `tatt`;
 omit for plain). The same YAML drives both
 `train_single` and `tune_single` — a scalar trains, a `[default, min, max, kind]`
-list is searched. Templates live in `example_yamls/`; copy one into your
-`--fileroot` (e.g. `train_single_emulator_cosmic_shear.yaml`) and edit it.
+list is searched. Templates live in `example_yamls/` — one per driver style:
+`train_single_…` (fully documented train_args), `tune_single_…` (search
+ranges), `sweep_hyperparam_…` (the `sweep:` block, with common sweeps ready
+to swap in). Copy one into your `--fileroot` and edit it.
+
+### The `sweep:` block (one-knob sweeps) <a name="6a-sweep-block"></a>
+
+`sweep_hyperparam_emulator_cosmic_shear.py` reads one extra top-level YAML
+block (the other drivers ignore it) naming exactly one `train_args` leaf by
+its dotted path, and the values to try — one full training per value at
+fixed `N_train`:
+
+```yaml
+sweep:
+  parameter: lr.lr_base
+  values:
+    - 0.0010
+    - 0.0025
+    - 0.0063
+```
+
+| Rule | Why |
+|---|---|
+| any `train_args` leaf sweeps by dotted path (`bs`, `trim.start`, `model.cnn.kernel_size`, `model.cnn.film`, `head.lr_base`, …) | the sweep deep-copies `train_args` and sets that one leaf per point |
+| `model.activation` (or `.type`) is a special case | the activation family is resolved onto the experiment at build, not read from `train_args`; the driver sets it per value — leave `--activation` unset |
+| `model.name` / `model.ia` are refused | they change the model *class*; run one sweep per architecture and overlay the tables |
+| an unknown first segment is refused | a typo'd path would otherwise silently train the same config N times |
+| a missing intermediate block is created (`head.lr_base` with no `head:` block) | the usual guards still fire (`trunk`/`head` overrides need `trunk_epochs > 0`) |
+
+Outputs under `--fileroot`: `<--out>.txt` (`save_sweep_table`: numeric values
+as a value/frac table; categorical or boolean values as an index/frac table
+with a `# values: 0=…, 1=…` label line — `np.loadtxt` reads either) and
+`<--out>.pdf` (`plot_sweep_curve`). The full template is
+`example_yamls/sweep_hyperparam_emulator_cosmic_shear.yaml`, with the common
+sweeps (bs, activation family, film on/off, conv depth, head lr) ready to
+swap in.
+
+### Multi-GPU execution and packing <a name="6a-multi-gpu"></a>
+
+Every hyperparameter driver runs on all visible CUDA devices by default
+(`--n-gpus` caps it; one GPU or Apple MPS falls back to a serial loop). Jobs
+never split across GPUs — each training fits one card, so the parallelism is
+one whole training per worker process (spawn, so each child owns its CUDA
+context and its own cosmolike state):
+
+| Driver | Jobs | Split across GPUs | Extra flags |
+|---|---|---|---|
+| `sweep_ntrain` | one training per `N_train` | LPT (cost ∝ N: biggest first to the least-loaded GPU) | `--gpu-pack` |
+| `sweep_hyperparam` | one training per value | round-robin (equal cost) | `--gpu-pack` |
+| `bakeoff_activation` | one learning curve per activation | by activation | |
+| `tune_single` | Optuna trials | one worker per GPU, one shared study | `--journal` |
+
+**`--gpu-pack` (both sweep drivers; off by default).** Co-locates several
+trainings on one GPU when they are small. Each GPU is modeled as 4 capacity
+tokens; a point's tokens come from a conservative VRAM estimate
+(`2 · N · dv_width` float32 — the resident targets plus the pre-shuffle
+transient — plus a 2 GiB fixed overhead for the CUDA context, model, `Cinv`,
+and compile workspaces):
+
+```
+    estimated share of the card        tokens    concurrency
+    ≤ 20%                                1       up to 4 per GPU
+    20% – 40%                            2       up to 2 per GPU
+    > 40%                                4       exclusive
+```
+
+A per-GPU lock serializes token grabs (no multi-token deadlock); the flag
+engages even with a single visible GPU (a lone H200 allocation runs up to 4
+small points at once). Why it works: a small training is launch-bound — the
+CPU dispatch, not the GPU, sets the epoch time — so co-located processes
+time-slice into each other's idle gaps. When to use it: large cards (H200)
+with small-to-mid `N_train` points. When not to: small cards (the 2 GiB
+overhead alone is ~17% of a 3060 — though the estimate then marks points
+exclusive anyway, so the flag degrades to plain one-per-GPU), and any run
+whose per-epoch timings you want to quote — co-located points contend and
+are not comparable to exclusive runs. If a point outgrows its estimate, the
+loaders degrade to streaming against the GPU's real free memory rather than
+crash. On NVWULF, enabling CUDA MPS (`nvidia-cuda-mps-control`) tightens the
+time-slicing further; the flag works without it.
+
+**Parallel Optuna (`tune_single --n-gpus N`).** The workers cooperate on ONE
+study through an Optuna journal file (`--journal`, default
+`tune_journal.log` under `--fileroot`): the parent creates the study and
+enqueues the YAML-defaults warm-start once, `--n-trials` is the total split
+across workers, and each worker proposes with its own sampler seed (a shared
+seed would duplicate proposals). The journal persists — rerunning with the
+same `--journal` RESUMES the study (the recorded trials inform the new
+ones); delete the file or pass a new name to start fresh. The serial path
+(1 GPU / MPS) stays in-memory and writes nothing.
 
 ---
 
@@ -716,10 +825,15 @@ The run layer that ties everything together.
 ### `emulator/scheduling.py` <a name="apx-scheduling"></a>
 
 - `lpt_assign(sizes, n_workers)` — split sweep jobs across GPUs by total cost (Longest-Processing-Time).
+- `even_assign(jobs, n_workers)` — round-robin split for equal-cost jobs.
+- `run_gpu_pool(setup_fn, job_fn, buckets, extra, lanes_per_gpu, job_tokens, on_result)` — the spawned worker pool: one process per (GPU, lane), per-GPU job queues, token gate under packing, parent-side result drain.
+- `estimate_train_vram_fraction(n_rows, dv_width, total_bytes)` — conservative per-training VRAM share (`--gpu-pack`).
+- `vram_tokens(fraction)` — the packing rule: ≤20% → 1 token, ≤40% → 2, else 4 (exclusive) of `GPU_TOKENS = 4`.
 
 ### `emulator/results.py` <a name="apx-results"></a>
 
 - `save_learning_curves(path, sizes, curves, meta)` — write a `np.loadtxt`-friendly plain-text table.
+- `save_sweep_table(path, param, values, fracs, meta)` — the one-knob sweep table (numeric values as a column; categorical as an index + label map).
 - `save_emulator(path_root, model, param_geometry, geometry, config, histories, train_args, attrs)` — persist a trained run: `.emul` (cpu state_dict, compile prefix stripped) + `.h5` (geometry `state()` groups, per-epoch histories, config YAML, run-identity attrs).
 
 ### `emulator/plotting.py` <a name="apx-plotting"></a>
@@ -769,6 +883,7 @@ Each `main()` reads `--root` / `--fileroot` / `--yaml`; the sweep / bake-off add
 per-GPU workers.
 
 - `train_single_emulator_cosmic_shear.py` — `main`: one training run + the diagnostics PDF.
-- `tune_single_emulator_cosmic_shear.py` — `main`: an Optuna study over the YAML's search ranges.
-- `sweep_ntrain_emulator_cosmic_shear.py` — `main` + `_sweep_worker` + `_run_parallel` (LPT split) / the serial path; `f(dchi2>thr)` vs `N_train`.
+- `tune_single_emulator_cosmic_shear.py` — `main` + `_tune_worker` + `journal_storage`: an Optuna study over the YAML's search ranges; serial in-memory, or one worker per GPU sharing a journal-file study.
+- `sweep_ntrain_emulator_cosmic_shear.py` — `main` + `_sweep_setup` / `_sweep_job` + `_run_parallel` (LPT split through `run_gpu_pool`) / the serial path; `f(dchi2>thr)` vs `N_train`; `--gpu-pack`.
+- `sweep_hyperparam_emulator_cosmic_shear.py` — `main` + `set_by_path` / `read_sweep_block` + `_hyper_setup` / `_hyper_job`; one YAML-chosen knob (`sweep:` block), even split through `run_gpu_pool`; `--gpu-pack`.
 - `bakeoff_activation_emulator_cosmic_shear.py` — `main` + `_bakeoff_worker` + `_run_parallel_bakeoff` (activation split) / the serial path; one curve per activation.

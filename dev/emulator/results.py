@@ -67,6 +67,66 @@ def save_learning_curves(path, sizes, curves, meta=None):
     f.write("\n".join(lines) + "\n")
 
 
+def save_sweep_table(path, param, values, fracs, meta=None):
+  """
+  Write a one-hyperparameter sweep as a whitespace-delimited table.
+
+  The generic twin of save_learning_curves for an arbitrary swept
+  knob. Numeric values become the first data column; categorical
+  values (strings, or booleans -- a film on/off sweep) become an
+  integer index column with the label map on a "# values:" comment
+  line, so the body stays np.loadtxt-loadable either way. Layouts:
+
+      # sweep: f(delta-chi2 > threshold) vs lr.lr_base
+      # model=rescnn  threshold=0.2  n_train=250000
+      # columns: lr.lr_base, frac
+      0.001  0.401234
+      ...
+
+      # sweep: f(delta-chi2 > threshold) vs model.activation
+      # values: 0=H, 1=power, 2=multigate
+      # columns: index, frac
+      0  0.401234
+      ...
+
+  Arguments:
+    path   = output text-file path.
+    param  = the swept hyperparameter's dotted YAML path (names the
+             x column).
+    values = the swept values, one per row (numbers, strings, or
+             booleans).
+    fracs  = per-value fractions aligned with `values`.
+    meta   = optional mapping written as a "# key=val" line; None
+             to omit.
+  """
+  # booleans pass isinstance(v, int) in Python; check them first so
+  # a True/False sweep is labeled, not silently cast to 1/0.
+  numeric = True
+  for v in values:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+      numeric = False
+  lines = [f"# sweep: f(delta-chi2 > threshold) vs {param}"]
+  if meta:
+    pairs = []
+    for k, v in meta.items():
+      pairs.append(f"{k}={v}")
+    lines.append("# " + "  ".join(pairs))
+  if numeric:
+    lines.append(f"# columns: {param}, frac")
+    for v, f in zip(values, fracs):
+      lines.append(f"{float(v):.8g}  {f:.6f}")
+  else:
+    labels = []
+    for i, v in enumerate(values):
+      labels.append(f"{i}={v}")
+    lines.append("# values: " + ", ".join(labels))
+    lines.append("# columns: index, frac")
+    for i, f in enumerate(fracs):
+      lines.append(f"{i:d}  {f:.6f}")
+  with open(path, "w") as f:
+    f.write("\n".join(lines) + "\n")
+
+
 def save_emulator(path_root,
                   model,
                   param_geometry,

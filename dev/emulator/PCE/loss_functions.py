@@ -1,4 +1,25 @@
-"""NPCE losses: a frozen PCE base plus a refiner."""
+"""NPCE losses: a frozen PCE base plus a neural refiner.
+
+Both classes wrap a fitted, frozen PCEEmulator as the base prediction
+under a trainable refiner network, differing in how base and refiner
+combine: PCEResidualChi2 is additive in the whitened basis (the
+refiner learns truth minus base), PCERatioChi2 multiplicative in the
+physical basis (the refiner learns a fractional correction). Either
+way the chi2 stays the plain masked Mahalanobis distance -- the base
+moves only the target's zero point or scale, never the metric.
+
+Both declare needs_params = True (encode / decode evaluate the base
+from the whitened parameters), the capability flag the loaders
+(batching.py), the training loop's compiled forward+loss and eval
+twins (training.py), and the diagnostics already branch on; the
+trim / focus / focus_scale reduction is inherited from CosmolikeChi2
+(_reduce), so these losses ride every loss-side update for free.
+
+PS: frozen = evaluated under no_grad, never trained; base = the
+closed-form PCE prediction; refiner = the SGD-trained network (any
+model spec) correcting it; Mahalanobis distance = r^T Cinv r, the
+covariance-weighted squared residual.
+"""
 
 import torch
 
@@ -10,10 +31,26 @@ class PCEResidualChi2(CosmolikeChi2):
   NPCE integration: the refiner model learns the residual of the
   full whitened dv after a frozen PCE base, the chi2 staying
   plain. Mirrors ResidualBaseChi2, with the PCE base in place of
-  the analytic center/R baseline:
-    target = geom.encode(dv) - PCE(theta)       (encode)
-    full   = PCE(theta) + model_output          (decode)
-    chi2   = plain CosmolikeChi2 on the residual.
+  the analytic center/R baseline.
+
+  Encode (target construction, at load time):
+
+      dv  (B, total_size)        raw data vector
+         │  geom.encode          squeeze -> center -> whiten
+         ▼
+      t  (B, n_keep)             whitened truth
+         │  - PCE(theta)         the frozen base (no_grad)
+         ▼
+      target (B, n_keep)         the refiner's residual target
+
+  Loss: plain chi2 on (pred - target) -- the base cancels in the
+  residual, (base + pred) - truth == pred - target, so the metric
+  is exact. Decode inverts: geom.decode(y + PCE(theta)).
+
+      (legend: B = batch rows; total_size = full 3x2pt dv length;
+       n_keep = kept entries the model emulates; theta = the
+       whitened parameters, params_whitened; PCE = the frozen
+       PCEEmulator, evaluated in the whitened basis.)
 
   The refiner is any model spec (ResMLP, ResCNN, ...) trained by
   run_emulator with the robust chi2 loss. It outputs the full dv
@@ -65,11 +102,39 @@ class PCERatioChi2(CosmolikeChi2):
   frozen base, delta the model output (fractional correction).
   Division-free; the chi2 is on (pred - truth) directly.
 
-  Speed: the frozen base is precomputed once at load time and
-  packed with the truth into the encoded target (encode returns
-  [b ; xi], width 2*n_keep), so chi2 never re-runs the PCE in the
-  training loop -- it just unpacks and forms b*(1+delta). (The
-  loader stages a 2*n_keep-wide target via target_dim.)
+  Speed design: the frozen base is precomputed once at load time
+  and packed with the truth into the encoded target, so the chi2
+  never re-runs the PCE in the training loop -- it just unpacks
+  and forms b * (1 + delta). The loader stages the wider target
+  via the target_dim attribute (batching.py reads it).
+
+  Encode (at load, once per row):
+
+      dv  (B, total_size)
+         │  geom.squeeze         physical kept entries
+         ▼
+      xi  (B, n_keep)        b  (B, n_keep) = geom.decode(
+         │                      │              PCE(theta))
+         │                      │  the frozen base, physical
+         └───────── cat ────────┘
+         ▼
+      target = [b ; xi]  (B, 2*n_keep)
+
+  chi2 (hot path, per batch):
+
+      target (B, 2*n_keep)
+         │  unpack              b = target[:, :n_keep]
+         │                      xi = target[:, n_keep:]
+         ▼
+      r = b*(1 + pred) - xi     pred = the fractional correction
+         │  einsum r^T Cinv_sq r
+         ▼
+      c  (B,)                   per-sample chi2, no PCE recompute
+
+      (legend: B = batch rows; total_size = full 3x2pt dv length;
+       n_keep = kept entries; theta = the whitened parameters,
+       params_whitened; Cinv_sq = the kept x kept sub-block of the
+       inverse covariance.)
 
   Trade-offs vs additive: target is not whitened; where b ~ 0
   (xi+/- zero crossings) the refiner has little leverage. Use a

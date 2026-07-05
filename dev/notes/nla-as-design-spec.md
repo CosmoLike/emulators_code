@@ -118,6 +118,137 @@ shared attention the head is permutation-equivariant over tokens (the
 unique weights WERE the positional encoding); token identity then
 comes only from segment content. Default false (unique).
 
+**GENERIC HYPERPARAM SWEEP + GPU PACKING + PARALLEL OPTUNA
+(2026-07-04y; user: "drivers to go over things like batch size or
+activation functions... a YAML file to decide which hyperparameter"
++ "make sure all these drivers work on multiple GPUs" + the H200
+multi-training-per-GPU question + "is the Optuna driver ready for
+multiGPU? IF not - please make it").**
+(1) NEW DRIVER sweep_hyperparam_emulator_cosmic_shear.py: sweeps
+exactly ONE train_args leaf named by a dotted path in a YAML
+`sweep:` block (parameter + values; block-style example commented
+in the train YAML). Any leaf: bs, lr.lr_base, trim.start,
+model.cnn.kernel_size, model.cnn.film (bools), head.lr_base
+(missing blocks created; the trunk_epochs guard still fires).
+Special case model.activation(.type) sets exp.activation per value
+(build_specs reads the family off the experiment, NOT train_args
+-- a train_args copy would silently no-op); model.name/ia REFUSED
+(class change); unknown first segments REFUSED (exp.train .gets
+top keys, so a typo'd path would silently train the same config N
+times -- SWEEPABLE_TOP_KEYS guards). set_by_path = deep-copy +
+dotted set. Data staged ONCE per worker (unlike ntrain). Outputs:
+save_sweep_table (results.py; numeric = value/frac columns,
+categorical/bool = index column + "# values: 0=H, 1=power" map,
+np.loadtxt-safe either way) + plot_sweep_curve (plotting.py;
+numeric line, log-x when positive span > 20x; categorical labeled
+markers; log-y only when all fracs > 0).
+(2) MULTI-GPU MACHINERY FACTORED into scheduling.py: even_assign
+(round-robin, equal-cost) + run_gpu_pool (spawn, one process per
+(GPU, lane), per-GPU job queues, setup_fn-once/job_fn-per-job,
+parent drains with timeout + liveness -> a dead worker raises
+instead of hanging; "__lane_failed__" names setup errors). BOTH
+sweep drivers now run through it (sweep_ntrain rewired:
+_sweep_worker/_run_parallel -> _sweep_setup/_sweep_job + pool).
+PYTHON 3.14 TRAP found + fixed: Process releases its args after
+start(), so loop-created Queues/Locks/Semaphores got GC'd -> named
+OS semaphores unlinked -> children died in SemLock._rebuild
+(FileNotFoundError); the pool keeps a keepalive list until join.
+(3) --gpu-pack (OFF by default, both sweep drivers; user's rule
+verbatim): estimate each training's VRAM fraction
+(estimate_train_vram_fraction: 2*N*dv_width*4 bytes -- targets +
+pre-shuffle transient, dv_width the on-disk width = upper bound --
++ 2 GiB fixed overhead) -> vram_tokens: <=20% -> 1 token (4 share
+a GPU), <=40% -> 2, else 4 = exclusive, of GPU_TOKENS=4 per card.
+Token grabs serialized by a per-GPU lock (multi-token deadlock
+impossible: releases need no lock). Engages even on ONE visible
+GPU (the lone-H200-allocation case). Numbers: 250k x 1560-wide dv
+~ 3.5% of an H200 (packs 4-way) but ~41% of a 3060 (exclusive) --
+matching the user's don't-pack-on-amypond requirement even if the
+flag is accidentally on. Underestimates degrade to streaming (the
+loaders size against real mem_get_info), not crashes; co-located
+timing numbers are NOT comparable to exclusive runs (documented).
+(4) tune_single MULTI-GPU: --n-gpus + --journal; parent creates
+ONE study in an optuna JournalStorage file under --fileroot
+(journal_storage() shims the 3.x/4.x backend rename), enqueues the
+warm-start only when the study is fresh, splits --n-trials, spawns
+one _tune_worker per GPU (own exp + staging, TPESampler(seed=
+gpu_id) -- same seed would duplicate proposals), all cooperating
+through the shared journal; parent reloads and prints the best.
+Same journal name RESUMES the study; serial path unchanged
+(in-memory, no file). ram_frac divided by workers (each stages the
+SAME subset -> P private copies, the parallel shared-budget trap).
+(5) TESTS: test_gpu_pool_pack.py (21 checks: token thresholds,
+estimate math + H200-vs-3060 sanity, even/lpt_assign, set_by_path
++ read_sweep_block validation incl. refusals, pool on CPU with
+timing-proven token exclusivity (exclusive job overlap -0.00s,
+1-token pair +1.00s) + loud setup failure, numeric/categorical
+table + figure round-trips, and 2 spawned processes sharing one
+journal study -- 8/8 trials, warm start honored). Suite total 17.
+README (tree, orchestration graph, driver tables, examples,
+appendices) + example YAML sweep: block updated. DOCS PASS (user:
+"write documentation on these new settings. And create example
+YAML"): README section 6 grew two anchored subsections -- "The
+sweep: block" (rules table + outputs) and "Multi-GPU execution and
+packing" (driver x split table, the token ladder, when to use
+--gpu-pack and when not, the journal resume semantics, the MPS
+note); NEW example_yamls/sweep_hyperparam_emulator_cosmic_shear.yaml
+(active lr sweep + five commented swap-in sweeps: bs, activation
+family, film on/off, cnn depth, head lr; compact train_args
+pointing at the train YAML for full key docs); tune YAML header
+now documents --n-gpus/--journal + resume. GPU-side verification
+(real co-located trainings, journal study on 2 cards) happens on
+amypond -- the Mac has no CUDA.**
+
+**DRIVER PARITY + SUBPACKAGE CURRENCY PASS (2026-07-04x,
+post-compact; user: "make sure sweep/tune are as updated as
+train_single" + "go over all files... formal and explicative and
+with plenty of graphs" + "PCE needs update... make sure both
+parallel/ and PCE/ work with all updates").** (1) The startup
+banner moved into EmulatorExperiment.print_design() (model spec /
+run line + two-phase split / guards clip+rewind / every sub-block
+incl. trunk:/head: / cuts; quiet-gated) and ALL THREE drivers call
+it -- a stale YAML now dies at launch of a sweep or study, not one
+training in. train_single's own header was itself stale (missing
+tatt, the 5 cnn knobs, trf film, clip/rewind) -- fixed as the
+reference; tune's header carried the PRE-NESTED flat schema example
+(model: int_dim_res -- would ERROR if copied) -> rewritten to
+model.mlp.width, plus a note that search ranges nest at any depth
+(model.cnn.kernel_size, head.lr_base; _walk_train_args recurses, so
+this always worked -- only the docs lagged). experiment.py __init__
+/ from_config docstrings caught up too (tatt, clip/rewind,
+new cnn/trf keys). (2) parallel/ + PCE/ brought to current
+machinery: ParallelResCNN gained the needs_geom + needs_bins
+capability flags (it predates the isinstance->flag refactor) and
+now THREADS block_opts["act"] into GroupedCNNBlock (same silent-H
+bug ResCNN got fixed for on 06-30); everything else verified
+compatible rather than changed -- the PCE losses already ride the
+static-shape _reduce by delegation, batching.py already honors
+target_dim + the needs_params encode, and the compiled
+fwd_loss/fwd_chi2 twins already branch on needs_p. The recorded PCE
+to-dos (pack-base-at-load via target_dim) were ALREADY BUILT.
+(3) Doc pass, house style (formal + shape-flow graphs with
+legends): parallel/ fully rewritten (module prose + ParallelResCNN
+forward graph + GroupedCNNBlock graph + full Arguments blocks --
+the user's flagged example); PCE/ module docstrings expanded
+(verdict + build lessons + PS jargon), PCEEmulator forward +
+from_training fit-pipeline graphs, PCEResidual encode graph,
+PCERatio pack/unpack graphs; batching.py regime-ladder graph +
+its 3 public sizing fns converted comment-headers -> formal
+docstrings; data_staging.py staging-pipeline graph + param_stats
+docstring; plotting.py plot_xi got a full Arguments docstring
+(body stays byte-faithful). AST-minus-docstrings diff proves
+doc-only files code-identical to HEAD; only
+parallel/emulator_designs.py carries code changes (the flags +
+act threading). NEW TESTS: test_print_design.py (banner content +
+quiet gating), test_pce_parallel.py (19 checks: PCE fit exact on
+a polynomial map 7.6e-14; residual loss == plain on base+pred
+under tensor trim/focus/kappa; ratio pack/unpack == direct
+residual; fullgraph compile + no recompile across annealed
+values; BOTH PCE losses train through training_loop_batched incl.
+the 2*n_keep target; ParallelResCNN flags/shape/act-threading;
+grouped conv leaks exactly 0 across bins). FULL BATTERY: 16/16
+suites green.
+
 **TRANSFER-LEARNING CURRICULUM IDEA (2026-07-04w, user, "for
 later" -- banked, NOT built).** Train the TRUNK on a restricted
 parameter space (fixed photo-z errors; later: LCDM only) using a

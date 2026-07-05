@@ -123,8 +123,49 @@ is `load_source`'s `np.loadtxt` of the full PARAMETER text file -- loaded whole,
 re-parsed on every `stage_train`, x P workers. There the params want a memmapped
 binary like the dv dump. Separate change from the GPU parallelization.
 
+## 2026-07-04y: the pattern grew a shared pool, VRAM packing, and a parallel study
+
+The per-driver spawn code is now ONE machine, `run_gpu_pool` (scheduling.py):
+one spawned process per (GPU, lane), per-GPU job queues, a driver-provided
+setup_fn (build + stage the experiment once per lane) and job_fn (one point;
+must be total -- return nan, never raise), the parent draining results with a
+timeout + liveness check so a dead worker raises instead of hanging. Both
+sweep drivers (ntrain + the new sweep_hyperparam) run on it; bakeoff still
+carries its own older copy of the pattern.
+
+Multi-training-per-GPU (`--gpu-pack`, OFF by default -- the user wants plain
+one-per-GPU on amypond's 3060s): each GPU = 4 capacity tokens; a job's tokens
+come from a conservative VRAM estimate (2*N*dv_width*4 bytes + 2 GiB
+overhead): <=20% of the card -> 1 token (4 co-located), <=40% -> 2, else
+exclusive. A lane holds a per-GPU lock while acquiring its tokens (multi-token
+deadlock impossible: releases need no lock). Engages even with ONE visible GPU
+(a lone H200 allocation). Why it works: small trainings are launch-bound (CPU
+dispatch, low SM occupancy), so co-located processes time-slice into each
+other's idle gaps; the compiled fwd_loss (fewer, bigger replays) makes
+co-location friendlier, and CUDA MPS on NVWULF would tighten it further. An
+under-estimate degrades to streaming (loaders size against real mem_get_info);
+co-located timings are not comparable to exclusive ones.
+
+PYTHON 3.14 SPAWN TRAP (cost a debugging session; remember it): Process
+releases target/args after start(), so a Queue/Lock/Semaphore created in a
+loop and referenced ONLY by Process args gets GC'd in the parent -> its named
+OS semaphore is unlinked -> a still-booting child dies with FileNotFoundError
+in SemLock._rebuild. Keep parent-side references (a keepalive list) to every
+sync object until join.
+
+Parallel Optuna (tune_single): one worker per GPU cooperating on ONE study
+through a JournalStorage file (append-only, file-locked; the multi-process
+storage Optuna recommends -- no database). Parent creates + warm-starts the
+study (only when fresh), splits --n-trials, workers load_study with
+per-worker sampler seeds (same seed = duplicated proposals). Same journal
+file RESUMES; serial path stays in-memory. ram_frac is divided by the worker
+count -- every worker stages the SAME subset, so materialization is P private
+copies (the shared-budget trap in yet another costume).
+
 **Why:** the full single-node multi-GPU sweep methodology, so the next session
 does not re-derive task-vs-data parallel, processes-vs-threads, spawn +
-set_device + empty_cache, LPT-vs-activation-split, the long-pole, or the
-shared-memmap-vs-private-copy RAM trap. Pairs with [[emulator-python-package]]
-(the drivers) and [[py-module-style-conventions]] (the .py style).
+set_device + empty_cache, LPT-vs-activation-split, the long-pole, the
+shared-memmap-vs-private-copy RAM trap, the pool/token/packing design, the
+py3.14 keepalive trap, or the journal-study pattern. Pairs with
+[[emulator-python-package]] (the drivers) and [[py-module-style-conventions]]
+(the .py style).

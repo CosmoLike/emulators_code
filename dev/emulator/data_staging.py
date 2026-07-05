@@ -11,6 +11,32 @@ window); read_param_names reads parameter names off a covmat
 header. load_source orchestrates: memmap, cut, size, stage one source into
 a {C, dv, idx, (+means)} dict.
 
+The staging pipeline, per source (load_source top to bottom):
+
+    <params>.txt                    <dv>.npy
+       │  np.loadtxt                   │  np.load(mmap_mode="r")
+       ▼                               ▼
+    C  (N, cols)                    dv (N, total_size), on disk
+       │  phys_cut_idx: omegabh2 bound (+ optional lower bound)
+       │  and the optional omegam2h2 window
+       ▼
+    pool = surviving row indices
+       │  keep N // divisor rows (or n_keep), one seeded shuffle
+       ▼
+    idx = this run's rows
+       │  stage_source: do the used rows fit ram_frac of free RAM?
+       │    yes -> materialize C[idx] / dv[idx], reindex local
+       │    no  -> keep the memmap, idx stays global
+       ▼
+    source dict {C, dv, idx, C_mean, dv_mean}
+
+    (legend: N = rows in the dump; cols = the .txt columns
+     (weight, lnp, params, chi2); total_size = full dv length;
+     divisor / n_keep = the size knobs, exactly one given;
+     C_mean / dv_mean = training-subset means the geometries
+     center on; local reindex = idx becomes arange so the staged
+     arrays and the loaders agree on row numbering.)
+
 PS: a dump is the full on-disk array from the data-generation run, every
 simulated cosmology stored as one row (the data-vector dump is the .npy
 file, the parameter dump the .txt); a training run draws its N_train
@@ -110,11 +136,23 @@ def stream_stats(mm, idx, method=1, CHUNK=10000):
 
 
 def param_stats(arr, idx, method=1):
-  # Per-column normalization stats for the cosmo params.
-  #   1 = z-score  -> returns (mean, std)
-  #   2 = min-max  -> returns (min,  max - min)
-  # Caller normalizes as (x - offset) / scale. float64 for
-  # accurate totals, then hand back float32.
+  """
+  Per-column normalization stats for the cosmo params.
+
+  The caller normalizes as (x - offset) / scale. Sums run in
+  float64 for accurate totals; the returned tensors are float32
+  (the model's dtype).
+
+  Arguments:
+    arr    = the parameter array (or memmap), row per sample.
+    idx    = row indices to compute the stats over (the training
+             subset; never the validation rows).
+    method = 1 -> z-score: returns (mean, std);
+             2 -> min-max: returns (min, max - min).
+
+  Returns:
+    (offset, scale) float32 torch tensors, one value per column.
+  """
   a = np.asarray(arr[idx], dtype="float64")
   if method == 1:
     offset = a.mean(axis=0)

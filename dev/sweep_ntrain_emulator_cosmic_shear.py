@@ -34,12 +34,32 @@
 #  One GPU (or none, e.g. the Apple-MPS dev machine) falls back to a serial
 #  loop, so the same script runs everywhere.
 #
+#- `--gpu-pack` (optional, off by default): co-locate several trainings on one
+#  GPU when they are small. Each point's VRAM need is estimated conservatively
+#  (2 * N * dv_width float32 + a 2 GiB fixed overhead, see
+#  emulator/scheduling.py); a point at or below 20% of the card shares it up
+#  to 4 ways, one at or below 40% up to 2 ways, anything bigger runs
+#  exclusive. It engages even with a single visible GPU (a lone H200
+#  allocation: up to 4 small points co-located on the one card). Worth it on
+#  a large card (H200) where a small-N training is
+#  launch-bound and leaves most of the GPU idle; leave it off on a small card
+#  (an RTX 3060: the fixed overhead alone is ~17% of 12 GB, and co-located
+#  contexts would crowd out the data). If a point outgrows its estimate the
+#  loaders degrade to streaming against the real free VRAM rather than crash.
+#  Keep it off for timing measurements -- co-located points contend and their
+#  s/epoch is not comparable to exclusive runs.
+#
 #- `--root` (required): project folder under $ROOTDIR (data resolves under it);
 #  `--fileroot` (required): subfolder holding the YAML and curve outputs (e.g.
 #  emulators/training_scripts). Cocoa layout, as in the training driver.
 #- `--yaml` (default test.yaml): config under --fileroot (data + train_args),
-#  training-driver schema; train_args.model.name picks ResMLP / ResCNN. The
-#  `data` block lists bare filenames, resolved under --root/chains.
+#  training-driver schema; train_args.model.name picks the architecture
+#  (resmlp | rescnn | restrf) and model.ia the factored IA design layered
+#  on it (omit | nla | tatt), with the nested mlp / activation / cnn /
+#  trf sub-blocks, the optional two-phase trunk_epochs + trunk / head
+#  override blocks, and the clip / rewind guards -- see the training
+#  driver's header for every key. The `data` block lists bare filenames,
+#  resolved under --root/chains.
 #- `--rescale` / `--activation`: as in the training driver, fixed across the
 #  sweep (analytic-R mode and ResBlock activation).
 #- `--n-gpus` (default: all visible CUDA devices): GPUs to spread across. 1, or
@@ -71,173 +91,170 @@ from emulator.cocoa import (
   add_cocoa_path_args, resolve_cocoa_config, cocoa_output)
 from emulator.experiment import EmulatorExperiment
 from emulator.results import save_learning_curves
-from emulator.scheduling import lpt_assign
+from emulator.scheduling import (
+  lpt_assign, run_gpu_pool, GPU_TOKENS,
+  estimate_train_vram_fraction, vram_tokens)
 
 
-def _sweep_worker(gpu_id, my_sizes, cfg, rescale, activation,
-                  threshold, result_q):
+def _sweep_setup(gpu_id, extra):
   """
-  One GPU's share of the N_train sweep; runs in its own process.
+  Per-worker setup for run_gpu_pool: one experiment on this GPU.
 
-  Pins itself to GPU `gpu_id`, builds its own EmulatorExperiment there, and
-  trains every N_train in `my_sizes` (its LPT bucket), putting one
-  (N, frac, gpu_id, seconds) tuple onto result_q as each finishes. Each process
-  has its own cosmolike global state and cached experiment, so workers never
-  interfere. A failure emits frac = nan, so the parent gets one result per N and
-  never deadlocks waiting on a missing one.
+  Runs once in each spawned lane. Builds this worker's own
+  EmulatorExperiment on its GPU (each process has its own cosmolike
+  global state and cached experiment, so workers never interfere) and
+  stages the validation set, which is fixed across the sweep.
 
   Arguments:
-    gpu_id     = CUDA device index this worker owns.
-    my_sizes   = N_train values assigned to this GPU (its LPT bucket).
-    cfg        = parsed YAML config (data + train_args), host ram_frac already
-                 divided across workers by the parent.
-    rescale    = analytic-R mode, forwarded to the experiment.
-    activation = ResBlock activation name, forwarded to the experiment.
-    threshold  = delta-chi2 cutoff for frac_above.
-    result_q   = multiprocessing queue the parent drains.
+    gpu_id = CUDA device index this lane owns (already claimed by
+             run_gpu_pool via torch.cuda.set_device).
+    extra  = the parent's payload dict: cfg (host ram_frac already
+             set for streaming), rescale, activation, threshold.
+
+  Returns:
+    the staged EmulatorExperiment (the pool hands it to _sweep_job).
   """
-  # claim this GPU so every default-device op (and run_emulator's
-  # torch.cuda.mem_get_info, which reads the current device when sizing the
-  # resident set) targets this card, not card 0.
-  torch.cuda.set_device(gpu_id)
   device = torch.device(f"cuda:{gpu_id}")
-
-  # this worker's own experiment on its GPU (quiet: the parent logs).
-  exp = EmulatorExperiment.from_config(cfg,
+  exp = EmulatorExperiment.from_config(extra["cfg"],
                                        device=device,
-                                       rescale=rescale,
-                                       activation=activation,
+                                       rescale=extra["rescale"],
+                                       activation=extra["activation"],
                                        quiet=True)
-  # validation set is fixed across the sweep; stage it once per worker.
   exp.stage_val()
+  return exp
 
-  for N in my_sizes:
-    t0 = time.time()
-    try:
-      # nested subset of size N, geometry rebuilt from its means, a fresh model
-      # trained quietly, then scored on the fixed val set.
-      exp.stage_train(n_train=int(N))
-      exp.build_geometry()
-      exp.train(silent=True)
-      f = float(exp.frac_above(threshold=threshold))
-    except Exception as err:                  # keep the sweep alive
-      f = float("nan")
-      print(f"[gpu {gpu_id}] N_train {int(N)} failed: {err}")
-    result_q.put((int(N), f, gpu_id, time.time() - t0))
 
-    # drop this point's GPU tensors and return the reserved VRAM, so the next N
-    # sizes its loaders against the true free memory. Otherwise the caching
-    # allocator keeps them reserved and run_emulator's mem_get_info under-reports
-    # the free VRAM.
-    exp.model     = None
-    exp.train_set = None
-    exp.geom      = None
-    exp.pgeom     = None
-    exp.chi2fn    = None
-    torch.cuda.empty_cache()
+def _sweep_job(gpu_id, exp, N, extra):
+  """
+  One sweep point for run_gpu_pool: train at N_train = N, score it.
+
+  Stages the nested subset of size N, rebuilds the geometry from its
+  means, trains a fresh model quietly, and scores it on the fixed val
+  set. Total by design (any failure returns frac = nan instead of
+  killing the lane), and it returns this point's GPU tensors before
+  finishing so the next point (possibly a co-located lane's) sizes
+  its loaders against the true free memory -- the caching allocator
+  would otherwise keep the VRAM reserved and mem_get_info would
+  under-report.
+
+  Arguments:
+    gpu_id = CUDA device index (result bookkeeping only).
+    exp    = this lane's experiment from _sweep_setup.
+    N      = the N_train value to train at.
+    extra  = the parent's payload dict (reads threshold).
+
+  Returns:
+    (N, frac, gpu_id, seconds) -- one result row for the parent.
+  """
+  t0 = time.time()
+  try:
+    exp.stage_train(n_train=int(N))
+    exp.build_geometry()
+    exp.train(silent=True)
+    f = float(exp.frac_above(threshold=extra["threshold"]))
+  except Exception as err:                  # keep the sweep alive
+    f = float("nan")
+    print(f"[gpu {gpu_id}] N_train {int(N)} failed: {err}")
+  exp.model     = None
+  exp.train_set = None
+  exp.geom      = None
+  exp.pgeom     = None
+  exp.chi2fn    = None
+  torch.cuda.empty_cache()
+  return (int(N), f, gpu_id, time.time() - t0)
 
 
 def _run_parallel(cfg, sizes, n_workers, args, log):
   """
-  Run the sweep across n_workers GPUs, one process each, LPT-balanced.
+  Run the sweep across n_workers GPUs via run_gpu_pool, LPT-balanced.
 
-  Splits `sizes` with lpt_assign so each GPU gets about the same total N_train,
-  spawns one process per GPU, and collects the per-point fractions. The host-RAM
-  budget (ram_frac) is divided by n_workers so they do not collectively overflow
-  host memory.
+  Splits `sizes` with lpt_assign so each GPU gets about the same total
+  N_train, then hands the buckets to run_gpu_pool (scheduling.py): one
+  spawned process per (GPU, lane), each building its own experiment
+  once (_sweep_setup) and training its points (_sweep_job); the parent
+  drains and logs one result per point. Host RAM stays flat because
+  ram_frac 0 tells stage_source to keep the shared dump memmap (a
+  per-worker private copy would multiply host RAM by the worker
+  count).
+
+  Under --gpu-pack the pool runs up to GPU_TOKENS lanes per GPU and
+  gates each point on its VRAM tokens (vram_tokens of the
+  estimate_train_vram_fraction of its N), so several small-N
+  trainings share one large GPU while a big-N point runs exclusive.
 
   Arguments:
     cfg       = the parsed YAML config (data + train_args).
     sizes     = the N_train grid (a sequence of ints).
-    n_workers = number of GPU processes to launch.
-    args      = the parsed CLI namespace (rescale / activation / threshold).
+    n_workers = number of GPUs to spread across.
+    args      = the parsed CLI namespace (rescale / activation /
+                threshold / gpu_pack).
     log       = print function (no-op under --quiet).
 
   Returns:
     fracs = list of f(delta-chi2 > threshold), aligned with `sizes`.
   """
-  import torch.multiprocessing as mp
-
-  # The workers never copy their subset into private RAM: ram_frac 0 tells
-  # stage_source to keep the shared dump memmap and stream the subset from it.
-  # The dump is one memmap shared across processes (via the OS page cache), so
-  # per-worker host RAM stays flat regardless of GPU count; a private copy would
-  # multiply host RAM by the GPU count for almost no gain (the subset sits
-  # resident on the GPU anyway). Copy the data block first to leave the original
-  # cfg untouched.
+  # ram_frac 0: stream from the one shared dump memmap (OS page
+  # cache); copy the data block first to leave the original cfg
+  # untouched.
   worker_cfg = dict(cfg)
   worker_cfg["data"] = dict(cfg["data"])
   worker_cfg["data"]["ram_frac"] = 0.0
 
-  # LPT split: largest N first, each to the least-loaded GPU.
+  # LPT split: largest N first, each to the least-loaded GPU. Bucket
+  # order is big-first, which is also the right queue order under
+  # packing (the exclusive points start first, the small ones fill
+  # the remaining lanes).
   buckets = lpt_assign(sizes, n_workers)
   for k, b in enumerate(buckets):
     log(f"  gpu {k}: {len(b)} points, total N {sum(b)}  ->  {sorted(b)}")
 
-  # One child process per GPU via the "spawn" start method: spawn launches a
-  # fresh Python interpreter per child, which re-imports this module to find
-  # _sweep_worker. The alternative "fork" (Linux default) clones the parent's
-  # memory, but a forked child inherits the parent's CUDA state and CUDA refuses
-  # to run through an inherited context (it hangs or errors); spawn gives each
-  # child a fresh interpreter and CUDA context, so every worker sets up its GPU
-  # cleanly. (macOS defaults to spawn; Linux must ask for it.)
-  ctx = mp.get_context("spawn")
+  # --gpu-pack: estimate each point's VRAM share and convert it to
+  # capacity tokens; the pool then co-locates points whose tokens fit
+  # (<=20% of the card -> 4 per GPU, <=40% -> 2, else exclusive).
+  # The estimate reads the dv dump's width (an upper bound on the
+  # staged target width) and GPU 0's total memory (a homogeneous-GPU
+  # assumption -- true on amypond's pair and on an H200 node).
+  lanes = 1
+  job_tokens = None
+  if args.gpu_pack:
+    dv_width = np.load(cfg["data"]["train_dv"], mmap_mode="r").shape[1]
+    total    = torch.cuda.get_device_properties(0).total_memory
+    def job_tokens(N):
+      return vram_tokens(estimate_train_vram_fraction(
+        n_rows=int(N), dv_width=dv_width, total_bytes=total))
+    lanes = GPU_TOKENS
+    toks = []
+    for N in sizes:
+      toks.append(f"{int(N)}:{job_tokens(N)}")
+    log(f"  gpu-pack on: tokens/4 per point  ->  {', '.join(toks)}")
 
-  # A process-safe queue, from the same spawn context so children can reconstruct
-  # it: the one-way channel workers send results on, each calling
-  # result_q.put((N, frac, gpu, secs)) and the parent loop below result_q.get().
-  # Process-safe means processes can put/get concurrently without corruption
-  # (internally a pipe guarded by locks).
-  result_q = ctx.Queue()
+  extra = {"cfg":        worker_cfg,
+           "rescale":    args.rescale,
+           "activation": args.activation,
+           "threshold":  args.threshold}
 
-  # Keep a handle to every child in `procs` to join() them below (and so Python
-  # does not garbage-collect them mid-run).
-  procs = []
-  for k in range(n_workers):
-    # Build (not yet start) one child. `target` is the function it runs, `args`
-    # the positional tuple. Under spawn both are pickled and shipped to the
-    # child, so each must be picklable: _sweep_worker is module-level
-    # (importable by name), and buckets[k] / worker_cfg / strings / float / queue
-    # are plain picklable data.
-    #
-    # args fills _sweep_worker's parameters in order:
-    #   k               -> gpu_id
-    #   buckets[k]      -> my_sizes
-    #   worker_cfg      -> cfg
-    #   args.rescale    -> rescale
-    #   args.activation -> activation
-    #   args.threshold  -> threshold
-    #   result_q        -> result_q
-    p = ctx.Process(target=_sweep_worker,
-                    args=(k,
-                          buckets[k],
-                          worker_cfg,
-                          args.rescale,
-                          args.activation,
-                          args.threshold,
-                          result_q))
-    # start() launches the OS process running _sweep_worker(*args) and returns
-    # immediately (training runs in the background), so the loop moves on to the
-    # next GPU; the parent gathers results afterward.
-    p.start()
-    procs.append(p)
-
-  # drain one result per point as the workers finish; the parent does all the
-  # logging (workers run quiet, so 8 streams do not interleave).
-  results = {}
-  for _ in range(len(sizes)):
-    N, f, gpu, secs = result_q.get()
-    results[N] = f
+  # the parent logs each point as it lands (workers run quiet, so
+  # multiple streams do not interleave).
+  def on_result(r):
+    N, f, gpu, secs = r
     log(f"  N_train {N:8d}  f(>{args.threshold:g}) {f:.4f}  "
         f"(gpu {gpu}, {secs:.0f}s)")
 
-  for p in procs:
-    p.join()
+  results = run_gpu_pool(setup_fn=_sweep_setup,
+                         job_fn=_sweep_job,
+                         buckets=buckets,
+                         extra=extra,
+                         lanes_per_gpu=lanes,
+                         job_tokens=job_tokens,
+                         on_result=on_result)
 
   # results arrived out of order; re-align to `sizes`.
+  by_N = {}
+  for N, f, gpu, secs in results:
+    by_N[N] = f
   fracs = []
   for N in sizes:
-    fracs.append(results[int(N)])
+    fracs.append(by_N[int(N)])
   return fracs
 
 
@@ -290,6 +307,15 @@ def main():
                       help="number of geometric grid points (default 5)",
                       type=int,
                       default=5)
+  parser.add_argument("--gpu-pack",
+                      dest="gpu_pack",
+                      help="co-locate small trainings on one GPU "
+                           "(<=20%% of the card -> up to 4 share, "
+                           "<=40%% -> up to 2, else exclusive; "
+                           "conservative VRAM estimate). Off by "
+                           "default; meant for large cards (H200), "
+                           "not a 12 GB RTX 3060",
+                      action="store_true")
   parser.add_argument("--threshold",
                       dest="threshold",
                       help="delta-chi2 cutoff the fraction counts "
@@ -352,14 +378,23 @@ def main():
   n_request = n_cuda if args.n_gpus is None else min(args.n_gpus, n_cuda)
   n_workers = min(n_request, len(sizes))
 
-  log(f"model: {model_name}  |  rescale: {args.rescale}  "
-      f"|  activation: {args.activation}")
+  # print_design (experiment.py): the startup banner -- the resolved
+  # model block, run knobs, guards, every train_args sub-block, and the
+  # physical cuts. A stale YAML here would waste a whole sweep, not one
+  # training. Shared with the train / tune drivers.
+  exp.print_design()
   log(f"pool {pool}  |  N_train grid: {sizes.tolist()}")
 
   # 1 worker (single GPU, or the MPS dev machine) -> serial on this one device,
   # reusing the experiment; otherwise one process per GPU, LPT-balanced.
-  if n_workers <= 1:
-    log(f"device: {exp.device}  |  serial (1 worker)")
+  # Exception: --gpu-pack engages the pool even on a SINGLE CUDA card (its
+  # whole point there: up to 4 small trainings co-located on one big GPU,
+  # e.g. a lone H200 allocation).
+  use_pool = (n_workers > 1
+              or (args.gpu_pack and n_cuda >= 1 and len(sizes) > 1))
+  if not use_pool:
+    # the banner already named the device; this line says only the mode.
+    log("serial (1 worker)")
     log("loading validation source:")
     exp.stage_val()
     fracs = []
@@ -373,10 +408,12 @@ def main():
       log(f"  N_train {int(N):8d}  f(>{args.threshold:g}) {f:.4f}  "
           f"({time.time() - t0:.0f}s)")
   else:
-    log(f"parallel sweep across {n_workers} GPUs (LPT-balanced):")
+    n_pool = max(1, n_workers)
+    log(f"parallel sweep across {n_pool} GPU(s) (LPT-balanced"
+        + (", gpu-pack" if args.gpu_pack else "") + "):")
     fracs = _run_parallel(cfg=cfg,
                           sizes=sizes,
-                          n_workers=n_workers,
+                          n_workers=n_pool,
                           args=args,
                           log=log)
 

@@ -13,6 +13,14 @@
 # run one study per choice to compare them. The training YAML's
 # trunk_epochs / head two-phase keys work here too (fixed scalars).
 #
+# Multi-GPU: with more than one visible CUDA device (cap with
+# --n-gpus) the trials run in parallel, one worker per GPU, all
+# cooperating on ONE study through a journal file (--journal, default
+# tune_journal.log under --fileroot). --n-trials is the TOTAL across
+# workers. The journal persists: rerunning with the same name RESUMES
+# the study; delete it (or pass a new name) to start fresh. See the
+# README section "Multi-GPU execution and packing".
+#
 # The data files below are bare filenames; the driver resolves them under
 # $ROOTDIR/<--root>/chains. cosmolike_data_dir / cosmolike_dataset are
 # separate, under $ROOTDIR/external_modules/data.

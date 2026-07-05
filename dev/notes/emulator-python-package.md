@@ -326,6 +326,40 @@ emulators-code-dev/b054b93a-.../scratchpad (venv gdvenv there;
 scratchpad survives compaction of THIS session, not a new one --
 recreate from the notes' per-block test descriptions if lost).
 Working tree has everything since the user's last commit.
+POST-COMPACT ADDENDUM (same day, 07-04x; full detail in
+[[nla-as-design-spec]] 04x): (a) EmulatorExperiment.print_design()
+= the shared startup banner (model spec, two-phase split,
+clip/rewind guards, trunk:/head: blocks, cuts); all three drivers
+call it; train/sweep/tune headers brought current (tatt, the 5 cnn
+knobs, trf film, clip/rewind; tune's flat-schema example was
+PRE-NESTED and would error -- fixed; search ranges nest at any
+depth, docs now say so). (b) parallel/: ParallelResCNN +=
+needs_geom/needs_bins flags + block_opts act threaded into
+GroupedCNNBlock; full doc rewrite with forward graphs (the user's
+flagged "incomplete and nonformal" example). (c) PCE/: verified
+current by construction (delegated _reduce; target_dim +
+needs_params honored by the loaders and the compiled twins; the
+recorded pack-at-load to-do was already built) + doc rewrite with
+graphs. (d) batching regime-ladder + data_staging staging-pipeline
+graphs; comment-header fns -> formal docstrings (the batching
+sizing trio, param_stats, plot_xi). Test battery now 16 suites
+(new: test_print_design, test_pce_parallel), all green.
+SECOND ADDENDUM (07-04y; full detail in [[nla-as-design-spec]]
+04y): NEW DRIVER sweep_hyperparam_emulator_cosmic_shear.py (one
+YAML-chosen train_args leaf via a sweep: block -- dotted path +
+values; activation special-cased through exp.activation; name/ia
++ typo paths refused; save_sweep_table + plot_sweep_curve outputs).
+scheduling.py grew even_assign + run_gpu_pool (spawn pool, lanes
+per GPU, keepalive fix for the py3.14 Process-releases-args ->
+SemLock-unlink crash) + the --gpu-pack token machinery
+(estimate_train_vram_fraction + vram_tokens: <=20% -> 4/GPU,
+<=40% -> 2/GPU, else exclusive; off by default; engages on a
+single GPU too). sweep_ntrain rewired onto the pool.
+tune_single now multi-GPU: --n-gpus + --journal, one worker per
+GPU sharing an optuna JournalStorage study (per-worker sampler
+seeds; same journal resumes). Battery 17 suites
+(+test_gpu_pool_pack, 21 checks); GPU-side verification pending
+on amypond (Mac has no CUDA).
 
 Historical context (07-04l run): phase 2 collapsed to frac ~0.305
 after head epoch ~272 (untrimmed-chi2 fit the monster tail; full

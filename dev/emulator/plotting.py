@@ -295,6 +295,82 @@ def plot_learning_curves(curves,
   _finish(fig, savepath)
 
 
+def plot_sweep_curve(param,
+                     values,
+                     fracs,
+                     threshold=0.2,
+                     target=0.10,
+                     savepath=None):
+  """
+  One-hyperparameter sweep figure: f(delta-chi2 > threshold) vs the
+  swept values.
+
+  The generic twin of plot_learning_curves for an arbitrary knob.
+  Numeric values draw a connected curve (log x when the values are
+  all positive and span more than a factor 20, so a log-spaced lr
+  grid reads evenly); categorical values (activation names, a
+  film True/False pair) draw one marker per value with the labels
+  as x ticks. y is logarithmic when every fraction is positive,
+  linear otherwise (a perfect 0.0 point would break a log axis).
+
+  Arguments:
+    param     = the swept hyperparameter's dotted YAML path (the x
+                label).
+    values    = the swept values, in sweep order (numbers, strings,
+                or booleans).
+    fracs     = per-value fractions aligned with `values`.
+    threshold = the delta-chi2 cutoff the fraction counts (labels
+                the y axis).
+    target    = a horizontal guide at the target fraction (default
+                0.10); None to omit it.
+    savepath  = if given, write the figure there and close; else
+                show.
+  """
+  # booleans are ints in Python; label them instead of plotting 0/1.
+  numeric = True
+  for v in values:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+      numeric = False
+  fr = np.asarray(fracs, dtype="float64")
+
+  fig, ax = plt.subplots(figsize=(6.8, 5.6))
+  if numeric:
+    xs = np.asarray(values, dtype="float64")
+    order = np.argsort(xs)                # draw left-to-right
+    # x = the swept values, y = fraction over the threshold.
+    ax.plot(xs[order],
+            fr[order],
+            "-o",
+            color=_CB[0],
+            lw=2.5,
+            ms=8)
+    if xs.min() > 0 and xs.max() / xs.min() > 20:
+      ax.set_xscale("log")
+  else:
+    xs = np.arange(len(values))
+    # x = value index (ticks carry the labels), y = the fraction.
+    ax.plot(xs,
+            fr,
+            "o",
+            color=_CB[0],
+            ms=10)
+    labels = []
+    for v in values:
+      labels.append(str(v))
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+  if np.all(fr[np.isfinite(fr)] > 0):
+    ax.set_yscale("log")
+  ax.set_xlabel(param)
+  ax.set_ylabel(rf"$f(\Delta\chi^2 > {threshold:g})$")
+  if target is not None:
+    ax.axhline(target, color="0.6", ls="--", lw=1,
+               label=f"target {target:g}")
+    ax.legend(frameon=False)
+  fig.tight_layout()
+  _finish(fig, savepath)
+
+
 def _floor_panel(ax, floor):
   """
   Draw the local-linear data-floor panel.
@@ -1050,14 +1126,51 @@ def dv_to_xi(dv_row, geom):
   return (geom.theta_centers, xip, xim)
 
 
-def plot_xi(pm, xi, xi_ref = None, param = None, colorbarlabel = None, 
-            marker = None, linestyle = None, linewidth = None, 
-            ylim = [0.88,1.12], cmap = 'gist_rainbow', legend = None, 
-            legendloc = (0.6,0.78), yaxislabelsize = 16, yaxisticklabelsize = 10, 
-            xaxisticklabelsize = 20, bintextpos = [[0.8, 0.875],[0.2,0.875]], 
-            bintextsize = 15, figsize = (12, 12), show = None, thetashow=[3,1000], 
+def plot_xi(pm, xi, xi_ref = None, param = None, colorbarlabel = None,
+            marker = None, linestyle = None, linewidth = None,
+            ylim = [0.88,1.12], cmap = 'gist_rainbow', legend = None,
+            legendloc = (0.6,0.78), yaxislabelsize = 16, yaxisticklabelsize = 10,
+            xaxisticklabelsize = 20, bintextpos = [[0.8, 0.875],[0.2,0.875]],
+            bintextsize = 15, figsize = (12, 12), show = None, thetashow=[3,1000],
             colorbar=1):
-    
+    """
+    Tomographic grid of xi+ / xi- curves (a visual check, not a
+    diagnostic page). One panel per redshift-bin pair: xi+ on the
+    lower triangle, xi- on the upper; absolute curves when xi_ref
+    is None, ratios xi / xi_ref otherwise. Ported byte-faithfully
+    from the notebook, so its body keeps the original style.
+
+    Arguments:
+      pm            = "p", "m", or "pm": which of xi+ / xi- to draw.
+      xi            = list of (theta, xip, xim) triples (dv_to_xi
+                      output), one curve set per line drawn.
+      xi_ref        = reference triple; when given, panels show the
+                      ratio xi / xi_ref and share both axes.
+      param         = per-curve scalar (e.g. a cosmology parameter)
+                      that colors the curves through cmap; length
+                      must match xi.
+      colorbarlabel = label for the param colorbar.
+      marker        = marker cycle (list) or None.
+      linestyle     = linestyle cycle (list); solid when None.
+      linewidth     = linewidth cycle (list) or None.
+      ylim          = y range of the ratio panels.
+      cmap          = matplotlib colormap name for param coloring.
+      legend        = per-curve legend labels or None.
+      legendloc     = legend anchor (axes fraction).
+      yaxislabelsize / yaxisticklabelsize / xaxisticklabelsize
+                    = font sizes for the y label and tick labels.
+      bintextpos    = [[x, y] lower, [x, y] upper] axes-fraction
+                      anchors of the per-panel bin annotation.
+      bintextsize   = font size of that annotation.
+      figsize       = figure size in inches.
+      show          = list of (i, j) bin pairs to draw; None = all.
+      thetashow     = [min, max] theta range (arcmin) shown.
+      colorbar      = 1 to draw the param colorbar, None to skip.
+
+    Returns:
+      the matplotlib figure (0 on malformed input, with a message).
+    """
+
     (theta, xip, xim) = xi[0]
     (ntheta, ntomo, ntomo2) = xip.shape    
 

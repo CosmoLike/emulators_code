@@ -229,22 +229,29 @@ class EmulatorExperiment:
                        schedule -- see run_emulator;
                      trunk / head = optional symmetric mappings of
                        per-phase overrides (lr_base / loss_mode /
-                       trim / focus) over the shared top-level
-                       defaults; need trunk_epochs > 0 -- see
-                       run_emulator.
+                       trim / focus / clip / rewind) over the shared
+                       top-level defaults; need trunk_epochs > 0 --
+                       see run_emulator;
+                     clip = optional (default 0.0 = off): per-step
+                       gradient-norm ceiling -- see run_emulator;
+                     rewind = optional (default False): reload the
+                       best weights + optimizer snapshot at every
+                       plateau lr cut -- see run_emulator.
                    Plus six constructible sub-blocks (each a mapping):
                      model = the NESTED model block: "name" (the
                        architecture: resmlp | rescnn | restrf) and
                        "ia" (the factored IA design layered on it:
-                       omit for plain, "nla"; the pair picks the
-                       class), then one sub-block per component --
+                       omit for plain, "nla" or "tatt"; the pair
+                       picks the class), then one sub-block per
+                       component --
                        "mlp" (width, n_blocks; the trunk, required),
                        "activation" ({type, n_gates} or a bare type
                        string; see the `activation` argument below),
-                       "cnn" (kernel_size, n_blocks, gate_init; name
+                       "cnn" (kernel_size, rescale_kernel, groups,
+                       separable, film, n_blocks, gate_init; name
                        rescnn only), "trf" (n_heads, n_blocks,
-                       n_mlp_blocks, shared_mlp, gate_init; name
-                       restrf only --
+                       n_mlp_blocks, shared_mlp, film, gate_init;
+                       name restrf only --
                        the tokens live at the natural bin width, so
                        there is no width knob) --
                        plus an optional flat "compile_mode".
@@ -348,8 +355,9 @@ class EmulatorExperiment:
       cfg    = mapping with a "data" block and a "train_args" block (the
                YAML schema; see __init__ for each block's keys).
       models = (name, ia) -> class registry (default MODELS: name is
-               the architecture, resmlp | rescnn; ia the factored IA
-               design layered on it, None | "nla").
+               the architecture, resmlp | rescnn | restrf; ia the
+               factored IA design layered on it, None | "nla" |
+               "tatt").
       **kwargs = forwarded to __init__ (opt_cls, sched_cls, probe,
                thresholds, use_amp, rescale, activation, device, quiet).
 
@@ -432,6 +440,74 @@ class EmulatorExperiment:
     with open(path) as f:
       cfg = yaml.safe_load(f)
     return cls.from_config(cfg, models=models, **kwargs)
+
+  # --- the startup banner ---
+  def print_design(self):
+    """
+    Print the resolved run design to stdout (the startup banner).
+
+    Announces the full design before anything trains, so a stale YAML
+    is caught at launch and not one 17-minute training (or one whole
+    sweep / study) later. Shared by every driver; quiet-gated through
+    self.log, so --quiet silences it with the rest.
+
+    Lines printed, in order:
+
+        device / model class / activation / rescale
+           |  the environment line: what runs where
+           v
+        model spec                the resolved model block (name, ia,
+           |                      mlp / cnn / trf sub-blocks) after
+           |                      default_train_args collapsed ranges
+           v
+        run: nepochs bs loss_mode (+ the two-phase split when
+           |                       trunk_epochs > 0)
+           v
+        guards: clip / rewind     only when either is set
+           |
+           v
+        one line per sub-block    optimizer / lr / scheduler / trim /
+           |                      focus / trunk / head, each printed
+           |                      only when present in train_args
+           v
+        cuts                      the physical omegabh2 / omegam2h2
+                                  windows from the data block
+
+    A sweep or a study varies pieces per point / per trial; this
+    banner shows the resolved defaults those variations start from.
+    """
+    ta = self.train_args
+    d  = self.data
+    self.log(f"device: {self.device}  |  "
+             f"model: {self.model_cls.__name__}  |  "
+             f"activation: {self.activation}  |  "
+             f"rescale: {self.rescale}")
+    self.log(f"model spec: {ta['model']}")
+    # trunk_epochs > 0 = the two-phase schedule (trunk then frozen-trunk
+    # head); print it only when active, so ordinary runs stay unchanged.
+    tk = ta.get("trunk_epochs", 0)
+    ph = (f"  (two-phase: {tk} trunk + {ta['nepochs'] - tk} head)"
+          if tk else "")
+    self.log(f"run: nepochs {ta['nepochs']}  bs {ta['bs']}  "
+             f"loss_mode {ta.get('loss_mode', 'sqrt')}{ph}")
+    # the stability guards (training.py run_emulator: clip = per-step
+    # gradient-norm ceiling, rewind = reload the best snapshot at every
+    # plateau lr cut); printed only when set, like the two-phase line.
+    clip   = ta.get("clip", 0.0)
+    rewind = ta.get("rewind", False)
+    if clip or rewind:
+      self.log(f"guards: clip {clip}  rewind {rewind}")
+    # the remaining train_args sub-blocks, one dict per line (including
+    # the per-phase trunk / head override blocks), so the whole resolved
+    # config is on the terminal.
+    for block in ("optimizer", "lr", "scheduler", "trim", "focus",
+                  "trunk", "head"):
+      if block in ta:
+        self.log(f"{block}: {ta[block]}")
+    self.log(f"cuts: omegabh2 in "
+             f"({d.get('omegabh2_lo')}, {d.get('omegabh2_cut')})  "
+             f"omegam2h2 in "
+             f"({d.get('omegam2h2_lo')}, {d.get('omegam2h2_hi')})")
 
   # --- staging + geometry (the expensive, cached pieces) ---
   def stage_train(self, n_train=None):
