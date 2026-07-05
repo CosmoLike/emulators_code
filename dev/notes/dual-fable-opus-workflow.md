@@ -90,3 +90,22 @@ file + notes reading. OPT-OUT is passive: plain `claude` with no /command and
 no handoff paste = normal session (dispatch rule 3); nothing to disable. If a
 session dies mid-milestone, relaunch + re-run the command pointing at the
 notes entry (resume state lives there, not in chat).
+
+**Location decision 2026-07-05 (KEEP IN dev/, do NOT move up):** the git repo
+root is `emulators_code/` — a MONOREPO holding `dev/` (this active emulator
+project, where `.claude/` + `CLAUDE.md` + `notes/` live) PLUS 9 sibling
+deployments (`emul_cosmic_shear/`, `emul_ggl/`, `emul_wtheta/`, `emulbaosn/`,
+`emulcmb/`, `emulmps/`, `emulrdrag/`, `emultheta/`, `emultraining/`). Moving
+`.claude/`+`CLAUDE.md` to the monorepo root was considered and REJECTED by the
+user: a root `CLAUDE.md` sits on the walk-up discovery path of all 10 projects,
+so every sibling would inherit the dual-agent workflow + dev-specific
+conventions = a LEAK. Current dev/-scoped placement is leak-free by
+construction (CLAUDE.md discovery walks UP from the session folder to the git
+root, never sideways/down; a sibling session finds no root CLAUDE.md and never
+reaches into dev/). **Desktop-app gotcha (the actual cause of the missing
+`/architect` `/implementer`):** the "worktree" checkbox roots the session at
+the git TOP = the monorepo root, where there is no `.claude/`, so project
+commands vanish. FIX = uncheck "worktree" + open the `dev` folder (commands are
+committed at `dev/.claude/commands/`). Worktree is ALSO wrong for this loop on
+its own merits — it hands each session an isolated checkout, splitting the
+shared `notes/` the Architect and Implementer hand off through.

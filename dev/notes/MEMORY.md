@@ -1,5 +1,6 @@
 # Memory index
 
+- [AI collaboration preferences (portable)](ai-collaboration-preferences.md) — read-me-first mirror of the ~/.claude auto-memory (which is path-keyed and won't survive the repo move); indexes code style / shape-flow / dual-agent / plots / machines, and captures IN FULL the two that lived only in auto-memory: YAML block style + the repo-notes ritual.
 - [Dual Fable/Opus workflow](dual-fable-opus-workflow.md) — .claude/FABLE_ROLE.md (Fable 5 architect/auditor) + OPUS_ROLE.md (Opus 4.8 implementer); handoff blocks persist to notes/ first; per-domain gates (CAMB ratio/!VM, cosmolike chi2, emulator frac>0.2); raw-output reporting; AUDIT = Fable-ONLY (user directive — never Opus, never self-check, cost is no excuse).
 - [Weight decay only on weight matrices](weight-decay-only-on-weight-matrices.md) — don't decay learned-activation/norm-gain/bias params; wd=0 or ndim>=2 split.
 - [Hanging indent, not paren alignment](hanging-indent-not-paren-alignment.md) — wrap multiline calls/signatures with a 2-space hanging indent, never align under the opening paren.
