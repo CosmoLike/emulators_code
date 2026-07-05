@@ -357,7 +357,12 @@ SemLock-unlink crash) + the --gpu-pack token machinery
 single GPU too). sweep_ntrain rewired onto the pool.
 tune_single now multi-GPU: --n-gpus + --journal, one worker per
 GPU sharing an optuna JournalStorage study (per-worker sampler
-seeds; same journal resumes). Battery 17 suites
+seeds; same journal resumes). DOC SURFACES: README section 6 has
+anchored subsections "The sweep: block" + "Multi-GPU execution
+and packing" (driver x split table, token ladder, journal
+semantics); NEW example_yamls/sweep_hyperparam_emulator_cosmic_
+shear.yaml (active lr sweep + 5 commented swap-ins); tune YAML
+header documents --n-gpus/--journal. Battery 17 suites
 (+test_gpu_pool_pack, 21 checks); GPU-side verification pending
 on amypond (Mac has no CUDA).
 
