@@ -142,9 +142,13 @@ class emultheta(Theory):
         state.update({"H0": par["H0"]})
         state.update({"omegam": par["omegam"]})
         state.update({"omegab": par["omegab"]})
-        state["derived"].update({"H0": par["H0"]})
-        state["derived"].update({"omegam": par["omegam"]})
-        state["derived"].update({"omegab": par["omegab"]})
+        # cobaya creates the derived-parameter store only when derived
+        # parameters are wanted (state["derived"] is None otherwise, e.g.
+        # model.loglike(..., return_derived=False)); same guard as emulrdrag
+        if state["derived"] is not None:
+            state["derived"].update({"H0": par["H0"]})
+            state["derived"].update({"omegam": par["omegam"]})
+            state["derived"].update({"omegab": par["omegab"]})
         return True
 
     def get_H0(self):
